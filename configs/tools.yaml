@@ -1,0 +1,22 @@
+tools:
+  discreteBeam:
+    module: src.tools.Discrete_Elastic_Beams
+    function: discreteBeam
+    description: Simulates deformation of a discrete elastic beam
+    parameters:
+      nv:
+        type: integer
+        minimum: 3
+        maximum: 30
+        default: 11
+
+  rod_simulation:
+    module: src.tools.Discrete_Elastic_Rods
+    function: discreteRod
+    description: Simulates deformation of a discrete elastic rod
+    parameters:
+      nv:
+        type: integer
+        minimum: 3
+        maximum: 30
+        default: 11
