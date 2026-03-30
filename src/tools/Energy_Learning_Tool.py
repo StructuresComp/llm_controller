@@ -1,12 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from autograd import grad, hessian
-
-from logging import ERROR
+from langchain.tools import tool
 
 #Helper function
 def crossMat(a):
@@ -341,252 +336,7 @@ def grad_and_hess_strain_curvature2D(node0, node1, node2):
 
   return gradKappa, DDkappa1
 
-# Gradient and Hessian of Elastic Energy - Stretching Energy in Conventional (Linear Elastic) Formulation
-
-def get_energy_stretch_linear_elastic(node0, node1, node2 = None, l_eff = None, EA = None):
-  strain_stretch = get_strain_stretch2D(node0, node1, node2, l_eff, l_eff)
-  E_s = 0.5 * EA * strain_stretch**2.0 * l_eff
-  return E_s
-
-# TODO: In the code below, I assume that l_1 and l_2 are both l_eff.
-# This only works if the mesh is uniform. The code should be updated so that it takes two lengths as inputs. The first length is mandatory. The second one is optional.
-
-def grad_and_hess_energy_stretch_linear_elastic(node0, node1, node2 = None, l_eff = None, EA = None):
-
-  strain_stretch = get_strain_stretch2D(node0, node1, node2, l_eff, l_eff)
-  G_strain, H_strain = grad_and_hess_strain_stretch2D(node0, node1, node2, l_eff, l_eff)
-
-  gradE_strain = EA * strain_stretch * l_eff
-  hessE_strain = EA * l_eff
-
-  G = gradE_strain * G_strain
-  H = gradE_strain * H_strain + hessE_strain * np.outer(G_strain, G_strain)
-
-  return G, H
-
-# Gradient and Hessian of Elastic Energy - Bending Energy in Conventional (Linear Elastic) Formulation
-def get_energy_bending_linear_elastic(node0, node1, node2 = None, l_eff = None, EI = None):
-  if node2 is None:
-    return 0
-  strain_curvature = get_strain_curvature2D(node0, node1, node2)
-  E_b = 0.5 * EI / l_eff * strain_curvature**2.0
-  return E_b
-
-def grad_and_hess_energy_bending_linear_elastic(node0, node1, node2 = None, l_eff = None, EI = None):
-
-  if node2 is None:
-    return np.zeros(4), np.zeros((4,4))
-
-  strain_curvature = get_strain_curvature2D(node0, node1, node2)
-  G_strain, H_strain = grad_and_hess_strain_curvature2D(node0, node1, node2)
-
-  gradE_strain = EI * strain_curvature / l_eff
-  hessE_strain = EI / l_eff
-
-  G = gradE_strain * G_strain
-  H = gradE_strain * H_strain + hessE_strain * np.outer(G_strain, G_strain)
-
-  return G, H
-
-# Define the custom SquareActivation function
-class SquareActivation(nn.Module):
-    def forward(self, x):
-        return x**2
-
-class ElasticEnergyGeneric(nn.Module):
-    def __init__(self):
-        super(ElasticEnergyGeneric, self).__init__()
-        self.layers = nn.Sequential(
-            SquareActivation(),
-            nn.Linear(2, 4, dtype=torch.float64),  # Initialize with float64
-            nn.ReLU(),
-            nn.Linear(4, 8, dtype=torch.float64),
-            nn.ReLU(),
-            nn.Linear(8, 4, dtype=torch.float64),
-            nn.ReLU(),
-            nn.Linear(4, 1, dtype=torch.float64),
-        )
-
-    def forward(self, x):
-        return self.layers(x)
-
-    def compute_energy_grad_hess(self, x):
-        """
-        Compute energy, gradient, and Hessian with respect to the input.
-
-        Parameters:
-            x (numpy.ndarray): Input vector (2D), shape (2,).
-
-        Returns:
-            tuple: (energy, gradient, Hessian), where:
-                - energy (float): Energy at the input.
-                - gradient (numpy.ndarray): Gradient vector, shape (2,).
-                - Hessian (numpy.ndarray): Hessian matrix, shape (2, 2).
-        """
-
-        # Ensure the input is a 2D tensor of shape (1, 2)
-        if isinstance(x, torch.Tensor):
-            x_tensor = x.clone().detach().reshape(1, -1).requires_grad_(True)  # Safely copy the tensor
-        else:
-            x_tensor = torch.tensor(x.reshape(1, -1), requires_grad=True, dtype=torch.float64)
-
-        # Forward pass to compute energy (output is scalar)
-        energy = self.forward(x_tensor).squeeze()  # Remove batch dimension, if any
-
-        # Compute gradient (dE/dx)
-        grad = torch.autograd.grad(energy, x_tensor, create_graph=True)[0].squeeze()  # Shape: (2,)
-
-        # Compute Hessian (d²E/dx²)
-        hess = torch.zeros((2, 2), dtype=torch.float64)  # Initialize Hessian
-        for i in range(2):  # Iterate over each dimension
-            grad_i = torch.autograd.grad(grad[i], x_tensor, retain_graph=True)[0].squeeze()  # Shape: (2,)
-            hess[i, :] = grad_i  # Fill row i of the Hessian
-
-        return energy.item(), grad.detach().numpy(), hess.detach().numpy()
-
-def train_elastic_energy_generic_model(model, x_train, y_train, E_train, epochs=10000, lr=0.01, verbose=True):
-    """
-    Train the ElasticEnergyGeneric model to approximate the energy function.
-
-    Parameters:
-        model (nn.Module): The neural network model to train.
-        x_train (numpy.ndarray): Training inputs (x-coordinates), shape (n_samples, 1).
-        y_train (numpy.ndarray): Training inputs (y-coordinates), shape (n_samples, 1).
-        E_train (numpy.ndarray): Training outputs (energies), shape (n_samples, 1).
-        epochs (int): Number of training epochs.
-        lr (float): Learning rate for the optimizer.
-        verbose (bool): Whether to print training progress.
-
-    Returns:
-        model (nn.Module): Trained model.
-        losses (list): List of loss values for each epoch.
-    """
-    # Combine x_train and y_train into a single input
-    inputs_train = np.hstack((x_train, y_train))  # Shape: (n_samples, 2)
-
-    # Convert training data to PyTorch tensors
-    inputs_tensor = torch.tensor(inputs_train, dtype=torch.float64)  # Shape: (n_samples, 2)
-    E_train_tensor = torch.tensor(E_train, dtype=torch.float64)      # Shape: (n_samples, 1)
-
-    # Define loss function and optimizer
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-
-    # List to store loss values for plotting
-    losses = []
-
-    # Training loop
-    for epoch in range(epochs):
-        # Forward pass
-        predictions = model(inputs_tensor)
-        loss = criterion(predictions, E_train_tensor)
-
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        # Save loss for monitoring
-        losses.append(loss.item())
-
-        # Print progress
-        if verbose and (epoch + 1) % (epochs // 20) == 0:
-            print(f'Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.6f}')
-
-    return model, losses
-
-# Gradient and Hessian of Elastic Energy - Stretching Energy in NN-based (Linear Elastic) Formulation
-def get_energy_stretch_nn(node0, node1, node2=None, l_eff=None, EA=None, nn_model=None):
-    """
-    Compute the energy using the NN-based solution for strain stretch.
-
-    Parameters:
-        node0 (array-like): Coordinates of node 0.
-        node1 (array-like): Coordinates of node 1.
-        node2 (array-like, optional): Coordinates of node 2.
-        l_eff (float): Effective length.
-        EA (float): Axial stiffness (Young's modulus * Area).
-        nn_model (ElasticEnergy): Trained neural network for energy computation.
-
-    Returns:
-        float: Energy computed using the NN-based solution.
-    """
-    # Compute strain stretch using the existing function
-    strain_stretch = get_strain_stretch2D(node0, node1, node2, l_eff, l_eff)
-
-    # Use the NN model to compute energy instead of strain_stretch**2.0
-    strain_tensor = torch.tensor([[strain_stretch]], dtype=torch.float64)
-    nn_energy_output = nn_model.forward(strain_tensor).item()
-    # nn_energy_output, grad, hess = nn_model.compute_energy_grad_hess(strain_tensor)
-
-    # Scale by EA and l_eff as in the original function
-    E_s = 0.5 * EA * nn_energy_output * l_eff
-    return E_s
-
-def grad_and_hess_energy_stretch_nn(node0, node1, node2 = None, l_eff = None, EA = None, nn_model=None):
-
-    strain_stretch = get_strain_stretch2D(node0, node1, node2, l_eff, l_eff) # Geometry, no ML
-    G_strain, H_strain = grad_and_hess_strain_stretch2D(node0, node1, node2, l_eff, l_eff) # Geometry, no ML
-
-    # Use NN module
-    strain_tensor = torch.tensor([[strain_stretch]], dtype=torch.float64)
-    _, gradE_strain, hessE_strain = nn_model.compute_energy_grad_hess(strain_tensor)
-
-    # Scale
-    gradE_strain = (0.5 * EA * l_eff) * gradE_strain
-    hessE_strain = (0.5 * EA * l_eff) * hessE_strain
-
-    G = gradE_strain * G_strain
-    H = gradE_strain * H_strain + hessE_strain * np.outer(G_strain, G_strain)
-
-    return G, H
-
-# Gradient and Hessian of Elastic Energy - Bending Energy in NN-based (Linear Elastic) Formulation
-def get_energy_bending_nn(node0, node1, node2 = None, l_eff = None, EA = None, h = None, nn_model=None):
-
-  if node2 is None:
-    return 0
-
-  # Get curvature given three nodes
-  strain_curvature = get_strain_curvature2D(node0, node1, node2)
-
-  # Scale strain before passing onto the nn_model
-  strain_curvature = strain_curvature / l_eff * h
-  strain_tensor = torch.tensor([[strain_curvature]], dtype=torch.float64)
-
-  nn_energy_output = nn_model.forward(strain_tensor).item()
-
-  E_b = (0.5 * 0.25 * EA * l_eff) * nn_energy_output
-  # Note that EI / EA = 1/4 * h^2.
-  # Eb = 0.5 * EI / l_eff * kappa^2 = (0.5 * 0.25 * EA * l_eff) * (kappa*h/l_eff)^2
-  return E_b
-
-def grad_and_hess_energy_bending_nn(node0, node1, node2 = None, l_eff = None, EA = None, h = None, nn_model=None):
-
-  if node2 is None:
-    return 0, 0
-
-  strain_curvature = get_strain_curvature2D(node0, node1, node2)
-  G_strain, H_strain = grad_and_hess_strain_curvature2D(node0, node1, node2)
-
-  # Use NN module
-  # Scale strain before passing onto the nn_model
-  strain_curvature = strain_curvature / l_eff * h
-  strain_tensor = torch.tensor([[strain_curvature]], dtype=torch.float64)
-  _, gradE_strain, hessE_strain = nn_model.compute_energy_grad_hess(strain_tensor)
-  # Scale back
-  gradE_strain = gradE_strain * h / l_eff
-  hessE_strain = hessE_strain * h**2 / l_eff**2
-
-  G = gradE_strain * G_strain
-  H = gradE_strain * H_strain + hessE_strain * np.outer(G_strain, G_strain)
-
-  G = (0.5 * 0.25 * EA * l_eff) * G
-  H = (0.5 * 0.25 * EA * l_eff) * H
-
-  return G, H
-
-def get_energy_elastic_nn_generic(node0, node1, node2=None, l_eff=None, EA=None, h = None, nn_model_generic=None):
+def get_energy_elastic_nn_generic(node0, node1, node2=None, l_eff=None, EA=None, h = None, energy_model_generic=None):
     """
     Compute the energy using the NN-based solution for elastic energy.
 
@@ -596,7 +346,7 @@ def get_energy_elastic_nn_generic(node0, node1, node2=None, l_eff=None, EA=None,
         node2 (array-like, optional): Coordinates of node 2.
         l_eff (float): Effective length.
         EA (float): Axial stiffness (Young's modulus * Area).
-        nn_model (ElasticEnergy): Trained neural network for energy computation.
+        energy_model_generic (ElasticEnergy): Trained neural network for energy computation.
 
     Returns:
         float: Energy computed using the NN-based solution.
@@ -604,18 +354,18 @@ def get_energy_elastic_nn_generic(node0, node1, node2=None, l_eff=None, EA=None,
     # Compute stretch and curvature using the existing function
     strain_stretch = get_strain_stretch2D(node0, node1, node2, l_eff, l_eff)
     strain_curvature = get_strain_curvature2D(node0, node1, node2)
-    strain_curvature = strain_curvature / l_eff * h # Scale strain before passing onto the nn_model
+    strain_curvature = strain_curvature / l_eff * h # Scale strain before passing onto the energy model
 
     # Use the NN model to compute energy
-    strain_tensor = torch.tensor([[strain_stretch, strain_curvature]], dtype=torch.float64)
-    nn_energy_output = nn_model_generic(strain_tensor).item()
+    strain_tensor = np.array([[strain_stretch, strain_curvature]], dtype=np.float64)
+    nn_energy_output = energy_model_generic(strain_tensor).item()
 
     # Scale by EA and l_eff as in the original function
     E_elastic = (0.5 * EA * l_eff) * nn_energy_output
 
     return E_elastic
 
-def grad_and_hess_energy_elastic_nn_generic(node0, node1, node2 = None, l_eff = None, EA = None, h = None, nn_model_generic=None):
+def grad_and_hess_energy_elastic_generic(node0, node1, node2 = None, l_eff = None, EA = None, h = None, energy_model_generic=None):
 
     if node2 is None:
       # Compute stretch and curvature using the existing function
@@ -626,8 +376,8 @@ def grad_and_hess_energy_elastic_nn_generic(node0, node1, node2 = None, l_eff = 
       G_strain_stretch, H_strain_stretch = grad_and_hess_strain_stretch2D(node0, node1, node2, l_eff, l_eff)
 
       # Use NN module
-      strain_tensor = torch.tensor([[strain_stretch, strain_curvature]], dtype=torch.float64)
-      _, gradE_strain, hessE_strain = nn_model_generic.compute_energy_grad_hess(strain_tensor)
+      strain_tensor = np.array([[strain_stretch, strain_curvature]], dtype=np.float64)
+      _, gradE_strain, hessE_strain = energy_model_generic.compute_energy_grad_hess(strain_tensor)
 
       # Scale
       gradE_strain = (0.5 * EA * l_eff) * gradE_strain
@@ -642,18 +392,20 @@ def grad_and_hess_energy_elastic_nn_generic(node0, node1, node2 = None, l_eff = 
     # Compute stretch and curvature using the existing function
     strain_stretch = get_strain_stretch2D(node0, node1, node2, l_eff, l_eff)
     strain_curvature = get_strain_curvature2D(node0, node1, node2)
-    strain_curvature = strain_curvature / l_eff * h # Scale strain before passing onto the nn_model
+    strain_curvature = strain_curvature / l_eff * h # Scale strain before passing onto the energy model
 
     # Compute gradient and hessian of strains
     G_strain_stretch, H_strain_stretch = grad_and_hess_strain_stretch2D(node0, node1, node2, l_eff, l_eff)
     G_strain_curvature, H_strain_curvature = grad_and_hess_strain_curvature2D(node0, node1, node2)
     # Scale back
     G_strain_curvature = G_strain_curvature * h / l_eff
-    H_strain_curvature = H_strain_curvature * h**2 / l_eff**2
+    H_strain_curvature = H_strain_curvature * h / l_eff 
+    # This scaling has been validated against FDM and I am reasonably confident.
+    # Use test_FDM in test_beam_FDM.py to validate the correctness of the gradient and Hessian of the energy model
 
     # Use NN module
-    strain_tensor = torch.tensor([[strain_stretch, strain_curvature]], dtype=torch.float64)
-    _, gradE_strain, hessE_strain = nn_model_generic.compute_energy_grad_hess(strain_tensor)
+    strain_tensor = np.array([[strain_stretch, strain_curvature]], dtype=np.float64)
+    _, gradE_strain, hessE_strain = energy_model_generic.compute_energy_grad_hess(strain_tensor)
 
     # Scale
     gradE_strain = (0.5 * EA * l_eff) * gradE_strain
@@ -668,4 +420,134 @@ def grad_and_hess_energy_elastic_nn_generic(node0, node1, node2 = None, l_eff = 
     hessE_strain[1,0] * np.outer(G_strain_curvature, G_strain_stretch)
 
     return G, H
+
+#
+# The code above is from a previous example. The code below is for integration with LLM agents
+#
+
+# Step 1: Define a simple quadratic energy function for testing purposes
+class ElasticEnergyQuadratic:
+    def __init__(self, a=1.0, b=1.0, c=0.0):
+        self.a = float(a)
+        self.b = float(b)
+        self.c = float(c)
+
+    def forward(self, x):
+        """
+        x: array-like of shape (2,) or (1,2)
+        returns energy
+        """
+        x = np.asarray(x, dtype=np.float64).reshape(-1, 2)
+        eps = x[:, 0]
+        kap = x[:, 1]
+        energy = self.a * eps**2 + self.b * kap**2 + self.c * eps * kap
+        return energy
+
+    def compute_energy_grad_hess(self, x):
+        """
+        Returns:
+            energy: scalar
+            grad: np.ndarray shape (2,)
+            hess: np.ndarray shape (2,2)
+        """
+        x = np.asarray(x, dtype=np.float64).reshape(1, 2)
+        eps = x[0, 0]
+        kap = x[0, 1]
+
+        energy = self.a * eps**2 + self.b * kap**2 + self.c * eps * kap
+
+        grad = np.array([
+            2.0 * self.a * eps + self.c * kap,
+            2.0 * self.b * kap + self.c * eps
+        ], dtype=np.float64)
+
+        hess = np.array([
+            [2.0 * self.a, self.c],
+            [self.c, 2.0 * self.b]
+        ], dtype=np.float64)
+
+        return energy, grad, hess
+
+# Step 2: Define a function to compute the local gradient and Hessian of the elastic energy for a stencil of three nodes
+# Given a global configuration vector q, compute the global gradient and Hessian of the elastic energy
+# by assembling the contributions from each local element (stencil of three nodes).
+def assemble_global_grad_hess(q, l_eff, EA, h, energy_model):
+    """
+    q : global configuration vector, shape (2*N,)
+    Returns:
+        G_global : shape (2*N,)
+        H_global : shape (2*N, 2*N)
+    """
+    q = np.asarray(q, dtype=np.float64)
+    ndof = len(q)
+    N = ndof // 2
+
+    G_global = np.zeros(ndof, dtype=np.float64)
+    H_global = np.zeros((ndof, ndof), dtype=np.float64)
+
+    for k in range(1, N - 1):
+        node0 = np.array([q[2*k - 2], q[2*k - 1]], dtype=np.float64)
+        node1 = np.array([q[2*k],     q[2*k + 1]], dtype=np.float64)
+        node2 = np.array([q[2*k + 2], q[2*k + 3]], dtype=np.float64)
+
+        G_loc, H_loc = grad_and_hess_energy_elastic_generic(
+            node0=node0,
+            node1=node1,
+            node2=node2,
+            l_eff=l_eff,
+            EA=EA,
+            h=h,
+            energy_model_generic=energy_model
+        )
+
+        # global DOF indices for stencil (k-1, k, k+1)
+        idx = [2*k - 2, 2*k - 1, 2*k, 2*k + 1, 2*k + 2, 2*k + 3]
+
+        # assemble gradient
+        for a in range(6):
+            G_global[idx[a]] += G_loc[a]
+
+        # assemble Hessian
+        for a in range(6):
+            for b in range(6):
+                H_global[idx[a], idx[b]] += H_loc[a, b]
+
+    return G_global, H_global
+
+# Step 3: Define a function to evaluate the candidate solution by computing the residual and sensitivity loss
+# TODO: Need to wrap in a class so that LLMs do not have access to the unnecessary arguments and internal details of the energy model.
+def evaluate_candidate(q, S_true, free_index, fixed_index, weight,
+                       l_eff, EA, h, energy_model,
+                       w_res=1.0, w_sens=1.0):
+
+    G, J = assemble_global_grad_hess(q, l_eff, EA, h, energy_model)
+    
+    # External weight
+    ndof = len(q)
+    nv = ndof // 2
+    f_ext = np.zeros(ndof, dtype=np.float64)  # Assuming zero external
+    f_ext[1::2] = - weight / nv  # Apply weight to y-coordinates
+
+    G_f = G[free_index]
+    f_f = f_ext[free_index]
+
+    J_ff = J[np.ix_(free_index, free_index)]
+    J_fb = J[np.ix_(free_index, fixed_index)]
+
+    residual = G_f - f_f
+    loss_res = np.dot(residual, residual)
+
+    S_pred = - np.linalg.solve(J_ff, J_fb)
+    diffS = S_pred - S_true
+    loss_sens = np.sum( diffS ** 2 )
+
+    loss_total = w_res * loss_res + w_sens * loss_sens
+
+    return {
+        "loss_total": loss_total,
+        "loss_res": loss_res,
+        "loss_sens": loss_sens,
+        "residual": residual,
+        "S_pred": S_pred,
+    }
 

@@ -5,8 +5,7 @@ from langchain.tools import tool
 
 def summarize_sensitivity(
     S: np.ndarray,
-    zero_tol: float = 1e-12
-) -> Dict[str, Any]:
+    zero_tol: float = 1e-12) -> Dict[str, Any]:
     """
     Summarize an equilibrium sensitivity matrix with scalar diagnostics that are
     useful for model evaluation, experiment design, and instability detection.
