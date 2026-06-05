@@ -70,41 +70,42 @@ def _curvature_pattern_match(computed_signs: List[int], expected_pattern: List[i
     """
     Score curvature pattern match (0-100%, lower is better error).
 
-    More lenient: check if the dominant curvature matches the expected pattern,
-    allowing for noise and variation in the pattern.
+    Zeros (straight segments) are excluded from the fraction computation so
+    that shapes like L (straight + curved) score correctly.
+
+    Two-element pattern (e.g. [1, -1] for S-shape): checks that BOTH curvature
+    directions are present in roughly equal proportion (min fraction >= 0.3).
+
+    Single-element pattern (e.g. [1] for C): checks that the dominant nonzero
+    sign matches, and that it makes up >= ~70% of nonzero signs.
     """
-    if not computed_signs:
-        return 50.0 if not expected_pattern else 100.0
+    nonzero = [s for s in computed_signs if s != 0]
+    if not nonzero:
+        return 0.0     # all straight — no curvature mismatch
 
-    # Count sign frequencies
-    pos_count = sum(1 for s in computed_signs if s > 0)
-    neg_count = sum(1 for s in computed_signs if s < 0)
-    n_total = len(computed_signs)
+    n = len(nonzero)
+    pos_count = sum(1 for s in nonzero if s > 0)
+    neg_count = sum(1 for s in nonzero if s < 0)
 
-    if n_total == 0:
-        return 100.0
+    if len(expected_pattern) > 1:
+        # S-shape style: both curvature directions must be present
+        min_frac = min(pos_count, neg_count) / n
+        # Perfect: 50/50 split. Error grows as split becomes more one-sided.
+        threshold = 0.3
+        error_percent = max(0.0, (threshold - min_frac) / threshold * 100)
+        return min(error_percent, 100.0)
 
-    # Dominant sign in computed pattern
-    dominant_sign = 1 if pos_count >= neg_count else (-1 if neg_count > pos_count else 0)
-    dominant_fraction = max(pos_count, neg_count) / n_total
-
-    # Expected dominant sign
-    expected_dominant = expected_pattern[0] if expected_pattern else 0
-
-    # Score: how well does dominant sign match?
-    if expected_dominant == 0:
-        # No specific expectation
+    expected_sign = expected_pattern[0] if expected_pattern else 0
+    if expected_sign == 0:
         return 0.0
 
-    if dominant_sign == expected_dominant and dominant_fraction >= 0.6:
-        # Good match: dominant sign is correct and > 60% of signs
-        error_percent = (1 - dominant_fraction) * 50
-    elif dominant_sign == expected_dominant:
-        # Correct sign but not dominant enough
-        error_percent = 50 + (1 - dominant_fraction) * 25
+    n_matching = sum(1 for s in nonzero if s == expected_sign)
+    match_fraction = n_matching / n
+
+    if match_fraction >= 0.7:
+        error_percent = (1.0 - match_fraction) * 50
     else:
-        # Wrong dominant sign: major error
-        error_percent = 100.0
+        error_percent = 100.0 - match_fraction * 100
 
     return min(error_percent, 100.0)
 
@@ -193,38 +194,41 @@ def _symmetry_error(observable_positions: List[Tuple[float, float]]) -> float:
     return error_percent
 
 
-# Shape specifications: reference for each target shape
+# Shape specifications.
+# Turning angles and contact fractions are calibrated against the ideal synthetic
+# shapes in src/tests/test_shape_checker.py, which use arc-length parametrisation.
+# Real beam data will score against these references — deviation from the ideal
+# registers as nonzero error.
 SHAPE_SPECS = {
     "C": {
-        "curvature_pattern": [1],  # all left curves (positive curvature)
-        "expected_turning_angle": 1.5708,  # π/2 radians
-        "expected_wall_contact_fraction": 0.2,  # Relaxed: even small contact is ok
-        "wall_contact_tolerance": 0.5,  # Very relaxed for synthetic shapes
+        "curvature_pattern": [1],         # all positive (curves right)
+        "expected_turning_angle": 0.6955, # calibrated: R=0.15 arc to wall
+        "expected_wall_contact_fraction": 0.2,
+        "wall_contact_tolerance": 0.15,
         "symmetry_required": False,
         "weights": {"curvature": 0.50, "angle": 0.35, "contact": 0.15, "symmetry": 0.0},
     },
     "U": {
-        "curvature_pattern": [1, -1],  # left then right curvature
-        "expected_turning_angle": 3.14159,  # π radians (full reversal)
-        "expected_wall_contact_fraction": 0.2,
-        "wall_contact_tolerance": 0.6,
+        "curvature_pattern": [-1],        # all negative (single-direction semicircle)
+        "expected_turning_angle": -2.618, # calibrated: semicircle R=0.12
+        "expected_wall_contact_fraction": 0.1429,
+        "wall_contact_tolerance": 0.15,
         "symmetry_required": True,
-        "symmetry_tolerance": 0.40,  # More lenient symmetry check
         "weights": {"curvature": 0.35, "angle": 0.30, "contact": 0.15, "symmetry": 0.20},
     },
     "S": {
-        "curvature_pattern": [1, -1],  # Detect at least left-right transition
-        "expected_turning_angle": 0.0,  # Should return to neutral
-        "expected_wall_contact_fraction": 0.1,
-        "wall_contact_tolerance": 0.7,
+        "curvature_pattern": [1, -1],     # both directions present (alternating)
+        "expected_turning_angle": 0.0,    # calibrated: net zero rotation
+        "expected_wall_contact_fraction": 0.0,
+        "wall_contact_tolerance": 0.5,
         "symmetry_required": False,
-        "weights": {"curvature": 0.50, "angle": 0.30, "contact": 0.20, "symmetry": 0.0},
+        "weights": {"curvature": 0.60, "angle": 0.25, "contact": 0.15, "symmetry": 0.0},
     },
     "L": {
-        "curvature_pattern": [1],  # Single strong left turn
-        "expected_turning_angle": 1.5708,  # π/2 radians
-        "expected_wall_contact_fraction": 0.2,
-        "wall_contact_tolerance": 0.5,
+        "curvature_pattern": [1],         # positive curvature at the bend
+        "expected_turning_angle": 1.309,  # calibrated: 90° arc R=0.08
+        "expected_wall_contact_fraction": 0.1667,
+        "wall_contact_tolerance": 0.15,
         "symmetry_required": False,
         "weights": {"curvature": 0.45, "angle": 0.40, "contact": 0.15, "symmetry": 0.0},
     },

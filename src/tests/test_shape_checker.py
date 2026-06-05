@@ -14,54 +14,65 @@ from src.tools.shape_checker import compute_shape_error, compute_shape_signature
 
 # Synthetic reference shapes (observable nodes, simulated from ideal beam deformations)
 
+WALL_H = -0.12  # must match SHAPE_SPECS / config
+
+
 def create_c_shape() -> list:
-    """Create ideal C-shape: smooth left curve with strong positive curvature."""
-    # Circular arc: left curve with wall contact at bottom
-    R = 0.10
-    theta = np.linspace(0, np.pi / 2, 10)  # 90 degree turn
-    x = R * np.sin(theta)
-    y = -R * (1 - np.cos(theta))
-    y = y - 0.12  # Shift to wall height
+    """
+    Ideal C-shape: arm at top, beam curves RIGHT to wall.
+
+    Uses x = R*(1-cos φ), y = -R*sin φ so the beam starts pointing
+    straight down (φ=0) and rotates clockwise to pointing right (φ=π/2).
+    Tangent angle = φ (increases) → curvature signs all +1.
+    Last node lands exactly at y = WALL_H.
+    """
+    R = 0.15
+    phi_end = np.arcsin(abs(WALL_H) / R)          # node N4 lands at y = WALL_H
+    phi = np.linspace(0, phi_end, 5)
+    x = R * (1 - np.cos(phi))
+    y = -R * np.sin(phi)
     return list(zip(x, y))
 
 
 def create_u_shape() -> list:
-    """Create ideal U-shape: left arc + right arc, symmetric."""
-    # Start at top, curve left, curve right back
-    R = 0.08
-    n_half = 5
+    """
+    Ideal U-shape: symmetric semicircle, one open end to the other through the wall.
 
-    # Left arc: curve left from (0, 0) to (-R, -R)
-    theta_left = np.linspace(np.pi / 2, np.pi, n_half)
-    x_left = R * np.cos(theta_left)
-    y_left = -R * np.sin(theta_left)
-
-    # Right arc: mirror back right
-    theta_right = np.linspace(0, np.pi / 2, n_half)[1:]  # Skip center
-    x_right = R * np.cos(theta_right)
-    y_right = -R - R * (1 - np.sin(theta_right))
-
-    x = np.concatenate([x_left, x_right])
-    y = np.concatenate([y_left, y_right])
+    Uses x = R*cos(φ), y = -R*sin(φ), φ: 0 → π.
+    - N0: right arm top at (R, 0)
+    - N3: bottom centre at (0, -R) — exactly at wall when R = |WALL_H|
+    - N6: left arm top at (-R, 0)
+    Tangent angle = -φ (strictly decreasing) → curvature signs all -1.
+    Perfectly symmetric around x = 0.
+    """
+    R = abs(WALL_H)                                 # = 0.12: bottom node lands at wall
+    phi = np.linspace(0, np.pi, 7)
+    x = R * np.cos(phi)
+    y = -R * np.sin(phi)
     return list(zip(x, y))
 
 
 def create_s_shape() -> list:
-    """Create ideal S-shape: left arc then right arc."""
+    """
+    Ideal S-shape: beam curves right then immediately curves left.
+
+    First arc: +1 curvature (right).
+    Second arc: -1 curvature (left), joined continuously.
+    Net turning angle ≈ 0 (shape doubles back).
+    """
     R = 0.06
-    n_half = 5
+    phi_arc = np.pi / 3      # 60-degree arc each half
 
-    # Left arc: curve left
-    theta1 = np.linspace(0, np.pi / 2, n_half)
-    x1 = R * np.sin(theta1)
-    y1 = -R * (1 - np.cos(theta1))
+    # Right-curving arc (positive curvature)
+    phi1 = np.linspace(0, phi_arc, 4)
+    x1 = R * (1 - np.cos(phi1))
+    y1 = -R * np.sin(phi1)
 
-    # Right arc: curve right from end of left arc
-    start_x = x1[-1]
-    start_y = y1[-1]
-    theta2 = np.linspace(0, np.pi / 2, n_half)[1:]
-    x2 = start_x + R * (1 - np.sin(theta2))
-    y2 = start_y - R * np.cos(theta2)
+    # Left-curving arc (negative curvature) — continues from end of first arc
+    ex, ey = x1[-1], y1[-1]
+    phi2 = np.linspace(phi_arc, 0, 4)[1:]          # reverse: unwinds the turn
+    x2 = ex + R * (np.cos(phi2) - np.cos(phi_arc))
+    y2 = ey - R * (np.sin(phi_arc) - np.sin(phi2))
 
     x = np.concatenate([x1, x2])
     y = np.concatenate([y1, y2])
@@ -69,16 +80,26 @@ def create_s_shape() -> list:
 
 
 def create_l_shape() -> list:
-    """Create ideal L-shape: straight down then sharp left turn (90 degrees)."""
-    # Mostly straight down, then sharp left turn at bottom
-    n = 10
-    x = np.zeros(n)
-    y = np.linspace(0, -0.06, n)
+    """
+    Ideal L-shape: mostly straight down, then tight right-angle turn at the bottom.
 
-    # Sharp turn at the end: rotate last 3 nodes left
-    x[-3:] = np.array([-0.02, -0.04, -0.06])
-    y[-3:] = np.array([-0.06, -0.09, -0.12])
+    Straight section: arm at (0,0) going down to (0, -0.04).
+    Arc section: R=0.08 circle, curving right from (0, -0.04) to (0.08, -0.12).
+    Curvature signs: [0, +1, +1, +1] — zeros in straight part, +1 at the bend.
+    Last node lands exactly at wall.
+    """
+    R = 0.08
+    y_join = -0.04
 
+    x_str = np.array([0.0, 0.0, 0.0])
+    y_str = np.linspace(0.0, y_join, 3)
+
+    phi_arc = np.linspace(0, np.pi / 2, 4)
+    x_arc = R * (1 - np.cos(phi_arc))
+    y_arc = y_join - R * np.sin(phi_arc)
+
+    x = np.concatenate([x_str, x_arc[1:]])
+    y = np.concatenate([y_str, y_arc[1:]])
     return list(zip(x, y))
 
 
@@ -178,10 +199,7 @@ def test_all_shapes():
     print("=" * 70)
     print("SHAPE CHECKER TEST SUITE")
     print("=" * 70)
-    print("\n⚠️  NOTE: Synthetic test shapes may not achieve 0% error.")
-    print("Shape checker is designed to work with REAL beam configurations")
-    print("from orchestrator/programmer runs. These plots show that the")
-    print("error computation works and provides useful diagnostics.\n")
+    print("\nIdeal synthetic shapes — all should score 0.00% error.\n")
 
     figs = []
 
@@ -208,20 +226,9 @@ def test_all_shapes():
         fig = plot_shape(obs_positions, target_shape, error_result, title_suffix=f"(Synthetic {target_shape})")
         figs.append(fig)
 
-        print(f"  Plot saved (showing error computation works)")
-
-    print("\n" + "=" * 70)
-    print("INTEGRATION NOTES:")
-    print("=" * 70)
-    print("To achieve ~0% error, run the shape checker against:")
-    print("  - Real beam configurations from orchestrator iterations")
-    print("  - Extract observable_positions from state['shape_history']")
-    print("  - Pass to compute_shape_error(positions, target_shape)")
-    print("\nExample (in programmer_agent or evaluation harness):")
-    print("  from src.tools.shape_checker import compute_shape_error")
-    print("  error = compute_shape_error(state['shape_history'][-1], 'C')")
-    print("  print(f\"Shape match: {error['match_confidence_percent']:.1f}%\")")
-    print("=" * 70)
+        expected_max = 1.0
+        status = "✓ PASS" if error_result["overall_error_percent"] <= expected_max else "✗ FAIL"
+        print(f"  {status}")
 
     print("\nDisplaying plots...")
     plt.tight_layout()
