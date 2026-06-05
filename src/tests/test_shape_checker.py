@@ -33,8 +33,8 @@ ARC_LENGTH = 0.10   # beam length (m) — scale only, does not affect shape
 # and integration as the evaluator, the round-trip error is exactly 0 %.
 # ---------------------------------------------------------------------------
 
-def create_c_shape(n: int = 9, total_turn: float = 0.8) -> list:
-    """Constant-curvature arc (circular).  total_turn controls the bend angle."""
+def create_c_shape(n: int = 9, total_turn: float = np.pi / 2) -> list:
+    """Constant-curvature arc (circular).  Default = quarter-circle (90°)."""
     return build_ideal_from_edge_profile(
         THETA_PROFILES["C"], n, ARC_LENGTH, total_turn=total_turn
     )
@@ -47,8 +47,11 @@ def create_u_shape(n: int = 9, total_turn: float = np.pi) -> list:
     )
 
 
-def create_s_shape(n: int = 9, amplitude: float = 0.8) -> list:
-    """Half-sine θ profile: curves one way then back, net turn = 0."""
+def create_s_shape(n: int = 9, amplitude: float = 1.2) -> list:
+    """
+    Full-sine θ profile: curves right then left (or vice versa), net turn = 0.
+    amplitude controls the peak tangent deflection (rad).
+    """
     return build_ideal_from_edge_profile(
         THETA_PROFILES["S"], n, ARC_LENGTH, amplitude=amplitude
     )

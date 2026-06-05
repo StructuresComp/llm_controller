@@ -103,8 +103,12 @@ def _profile_u(s_norm: np.ndarray, total_turn: float = np.pi) -> np.ndarray:
 
 
 def _profile_s(s_norm: np.ndarray, amplitude: float = 0.5) -> np.ndarray:
-    """S: half-sine bump — beam curves one way then back, net turn = 0."""
-    return amplitude * np.sin(np.pi * s_norm)
+    """
+    S: full-sine profile — beam curves right then left (or vice versa), net turn = 0.
+    θ*(0)=0, peaks at s'=0.25, crosses zero at s'=0.5, troughs at s'=0.75, returns to 0.
+    Antisymmetric under reversal: θ*(1−s') = −θ*(s'), so both S orientations are valid.
+    """
+    return amplitude * np.sin(2 * np.pi * s_norm)
 
 
 def _profile_l(
@@ -140,8 +144,8 @@ def _fit_u(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
 
 
 def _fit_s(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
-    """Project onto sin(π s') to find the S amplitude."""
-    basis = np.sin(np.pi * s_norm)
+    """Project onto sin(2π s') to find the S amplitude."""
+    basis = np.sin(2 * np.pi * s_norm)
     denom = float(np.dot(basis, basis)) + 1e-12
     return {"amplitude": float(np.dot(dtheta, basis) / denom)}
 
