@@ -1,322 +1,317 @@
 # ---------------------------------------------------------------------------
-# src/evaluation/shape_checker.py
+# src/tools/shape_checker.py
 # ---------------------------------------------------------------------------
-# Deterministic geometric shape validator.
-# Computes normalized shape error (0-100%, where 0 = perfect match) from
-# observable node positions, agnostic to full vs. partial node counts.
+# Deterministic shape validator based on discrete curvature (DDG).
+#
+# Core idea: a discrete curve is fully described by the turning-angle sequence
+#   κ_i = θ_{i+1} − θ_i   at each interior node
+# This is invariant to rigid-body translation and rotation.
+# Wall position, absolute coordinates, and symmetry in XY are irrelevant.
+#
+# Section order:
+#   1. Imports
+#   2. Primitives      — extract_turning_angles, integrate_kappa
+#   3. Ideal profiles  — one function per shape type
+#   4. Error functions — one function per shape type
+#   5. Public API      — compute_shape_error, reconstruct_ideal
+#   6. Orchestrator    — compute_shape_signature (text descriptor for LLM)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 1. IMPORTS
+# ---------------------------------------------------------------------------
 import numpy as np
 from typing import List, Tuple, Dict
 
 
-def compute_shape_signature(observable_positions: List[Tuple[float, float]]) -> Dict:
+# ---------------------------------------------------------------------------
+# 2. PRIMITIVES
+# ---------------------------------------------------------------------------
+
+def extract_turning_angles(nodes: List[Tuple[float, float]]) -> np.ndarray:
     """
-    Compute geometric features from observable node positions.
+    Compute discrete curvature κ_i = θ_{i+1} − θ_i at each interior node.
+
+    θ_i is the tangent angle of edge i, measured counter-clockwise from the
+    −Y axis:  θ = arctan2(dx, −dy).
+
+    Returns array of length N−2 (N = number of nodes).
+    Invariant to rigid-body translation and rotation.
+    """
+    obs = np.array(nodes)
+    N = len(obs)
+    if N < 3:
+        return np.array([])
+
+    dx = np.diff(obs[:, 0])
+    dy = np.diff(obs[:, 1])
+    theta = np.arctan2(dx, -dy)         # CCW from −Y, length N−1
+
+    kappa = np.diff(theta)              # length N−2
+    kappa = (kappa + np.pi) % (2 * np.pi) - np.pi  # wrap to (−π, π]
+    return kappa
+
+
+def integrate_kappa(
+    kappa: np.ndarray,
+    arc_length: float,
+    start_pos: Tuple[float, float] = (0.0, 0.0),
+    start_angle: float = 0.0,
+) -> List[Tuple[float, float]]:
+    """
+    Reconstruct node positions from a turning-angle sequence.
+
+    N = len(kappa) + 2 nodes, uniform edge length ds = arc_length / (N−1).
+    start_angle is the tangent angle of the first edge (CCW from −Y).
+
+    Inverse of extract_turning_angles (exact round-trip for uniform spacing).
+    """
+    N = len(kappa) + 2
+    ds = arc_length / (N - 1)
+
+    nodes = [(float(start_pos[0]), float(start_pos[1]))]
+    x, y = float(start_pos[0]), float(start_pos[1])
+    theta = float(start_angle)
+
+    for i in range(N - 1):
+        x = x + ds * np.sin(theta)
+        y = y - ds * np.cos(theta)
+        nodes.append((x, y))
+        if i < N - 2:
+            theta += float(kappa[i])
+
+    return nodes
+
+
+# ---------------------------------------------------------------------------
+# 3. IDEAL κ PROFILES
+# ---------------------------------------------------------------------------
+
+def _ideal_kappa_c(kappa: np.ndarray) -> np.ndarray:
+    """C: best-fit constant curvature (circular arc)."""
+    return np.full(len(kappa), np.mean(kappa))
+
+
+def _ideal_kappa_u(kappa: np.ndarray) -> np.ndarray:
+    """U: constant curvature, total turn fixed at ±π."""
+    sign = float(np.sign(np.sum(kappa))) or 1.0
+    return np.full(len(kappa), sign * np.pi / len(kappa))
+
+
+def _ideal_kappa_s(kappa: np.ndarray) -> np.ndarray:
+    """S: antisymmetric profile scaled to match the total absolute turning."""
+    N = len(kappa)
+    mid = N // 2
+    profile = np.zeros(N)
+    profile[:mid] = 1.0
+    profile[N - mid:] = -1.0                            # middle = 0 for odd N
+    n_nonzero = float(np.sum(np.abs(profile))) or 1.0
+    scale = np.sum(np.abs(kappa)) / n_nonzero
+    return profile * scale
+
+
+def _ideal_kappa_l(kappa: np.ndarray) -> np.ndarray:
+    """L: all turning concentrated at the node with largest |κ|."""
+    ideal = np.zeros(len(kappa))
+    i_max = int(np.argmax(np.abs(kappa)))
+    ideal[i_max] = float(np.sum(kappa))
+    return ideal
+
+
+_IDEAL_FN: Dict = {
+    "C": _ideal_kappa_c,
+    "U": _ideal_kappa_u,
+    "S": _ideal_kappa_s,
+    "L": _ideal_kappa_l,
+}
+
+
+# ---------------------------------------------------------------------------
+# 4. ERROR FUNCTIONS  (0–100 %, lower = better)
+# ---------------------------------------------------------------------------
+
+def _c_error(kappa: np.ndarray) -> float:
+    """
+    C: constant curvature.  Error = coefficient of variation (std / |mean|).
+    0 % for a perfect circle of any radius; 100 % for an irregular curve.
+    """
+    mean_k = float(np.mean(kappa))
+    if abs(mean_k) < 1e-8:
+        return 100.0
+    return min(float(np.std(kappa)) / abs(mean_k) * 100.0, 100.0)
+
+
+def _u_error(kappa: np.ndarray) -> float:
+    """
+    U: constant curvature AND total turning ≈ ±π.
+    Combines CV (uniformity) with a turning-angle penalty.
+    """
+    mean_k = abs(float(np.mean(kappa)))
+    if mean_k < 1e-8:
+        return 100.0
+    cv = float(np.std(kappa)) / mean_k
+    angle_err = abs(abs(float(np.sum(kappa))) - np.pi) / np.pi
+    return min((0.5 * cv + 0.5 * angle_err) * 100.0, 100.0)
+
+
+def _s_error(kappa: np.ndarray) -> float:
+    """
+    S: antisymmetric κ sequence (κ_i ≈ −κ_{N−1−i}) and net turn ≈ 0.
+    Error = mean |κ + reverse(κ)| normalised by mean |κ|.
+    """
+    residual = float(np.mean(np.abs(kappa + kappa[::-1])))
+    scale = float(np.mean(np.abs(kappa))) + 1e-8
+    return min(residual / scale * 50.0, 100.0)
+
+
+def _l_error(kappa: np.ndarray) -> float:
+    """
+    L: curvature concentrated at a single interior node.
+    Error = 1 − (max|κ| / Σ|κ|), scaled to 0–100 %.
+    """
+    total = float(np.sum(np.abs(kappa)))
+    if total < 1e-8:
+        return 100.0
+    concentration = float(np.max(np.abs(kappa))) / total
+    return min((1.0 - concentration) * 100.0, 100.0)
+
+
+_ERROR_FN: Dict = {
+    "C": _c_error,
+    "U": _u_error,
+    "S": _s_error,
+    "L": _l_error,
+}
+
+
+# ---------------------------------------------------------------------------
+# 5. PUBLIC API
+# ---------------------------------------------------------------------------
+
+def compute_shape_error(
+    nodes: List[Tuple[float, float]],
+    target_shape: str,
+) -> Dict:
+    """
+    Compute normalised shape error (0–100 %, 0 = perfect match).
+
+    Invariant to translation, rotation, and CW/CCW orientation (the error
+    functions are all symmetric under κ → −κ for the shapes defined here).
 
     Args:
-        observable_positions: List of (x, y) tuples for observable nodes
+        nodes:        List of (x, y) node positions (any number ≥ 3).
+        target_shape: "C", "U", "S", or "L".
 
-    Returns:
-        Dict with:
-          - tangent_angles: list of angles (rad, CCW from -Y axis)
-          - curvature_signs: sequence of +1, 0, -1 indicating local bends
-          - total_turning_angle: net rotation from first to last node
-          - tip_position: (x, y) of last node
-          - n_nodes: number of observable nodes
+    Returns dict with:
+        error_percent      — 0 (perfect) to 100 (wrong shape)
+        confidence_percent — 100 − error_percent
+        kappa_provided     — extracted turning angles
+        kappa_ideal        — best-fit ideal turning angles
+        ideal_nodes        — ideal shape anchored to nodes[0] (for overlay)
+        diagnostics        — one-line explanation
+    """
+    if target_shape not in _ERROR_FN:
+        return {
+            "error_percent": 100.0, "confidence_percent": 0.0,
+            "kappa_provided": [], "kappa_ideal": [], "ideal_nodes": [],
+            "diagnostics": f"Unknown target shape: {target_shape}",
+        }
+
+    kappa = extract_turning_angles(nodes)
+    if len(kappa) == 0:
+        return {
+            "error_percent": 100.0, "confidence_percent": 0.0,
+            "kappa_provided": [], "kappa_ideal": [], "ideal_nodes": [],
+            "diagnostics": "Need at least 3 nodes.",
+        }
+
+    error = float(_ERROR_FN[target_shape](kappa))
+    kappa_ideal = _IDEAL_FN[target_shape](kappa)
+    ideal_nodes = reconstruct_ideal(nodes, kappa_ideal)
+    diagnostics = _diagnose(target_shape, error, kappa)
+
+    return {
+        "error_percent": error,
+        "confidence_percent": 100.0 - error,
+        "kappa_provided": kappa.tolist(),
+        "kappa_ideal": kappa_ideal.tolist(),
+        "ideal_nodes": ideal_nodes,
+        "diagnostics": diagnostics,
+    }
+
+
+def reconstruct_ideal(
+    nodes: List[Tuple[float, float]],
+    kappa_ideal: np.ndarray,
+) -> List[Tuple[float, float]]:
+    """
+    Reconstruct the ideal shape in the coordinate frame of the provided shape.
+
+    Anchors to nodes[0] (position) and the direction of edge 0 (tangent angle),
+    then integrates kappa_ideal forward with uniform arc-length spacing.
+    """
+    obs = np.array(nodes)
+    start_pos = (float(obs[0, 0]), float(obs[0, 1]))
+    dx0 = obs[1, 0] - obs[0, 0]
+    dy0 = obs[1, 1] - obs[0, 1]
+    start_angle = float(np.arctan2(dx0, -dy0))
+    arc_length = float(np.sum(np.sqrt(np.sum(np.diff(obs, axis=0) ** 2, axis=1))))
+    return integrate_kappa(kappa_ideal, arc_length, start_pos, start_angle)
+
+
+def _diagnose(target_shape: str, error: float, kappa: np.ndarray) -> str:
+    if error < 2.0:
+        return f"Shape matches {target_shape} well."
+
+    cv = float(np.std(kappa)) / (abs(float(np.mean(kappa))) + 1e-8)
+    total = float(abs(np.sum(kappa)))
+
+    if target_shape == "C":
+        return f"Curvature not uniform (CV={cv:.2f}); C needs constant κ."
+    if target_shape == "U":
+        return f"Total turning {total:.2f} rad (need π={np.pi:.2f}) or CV={cv:.2f} too high."
+    if target_shape == "S":
+        res = float(np.mean(np.abs(kappa + kappa[::-1]))) / (float(np.mean(np.abs(kappa))) + 1e-8)
+        return f"Antisymmetry residual {res:.2f} (want 0)."
+    if target_shape == "L":
+        conc = float(np.max(np.abs(kappa))) / (float(np.sum(np.abs(kappa))) + 1e-8)
+        return f"Curvature concentration {conc:.2f} (want ~1.0)."
+    return f"Error: {error:.1f}%."
+
+
+# ---------------------------------------------------------------------------
+# 6. ORCHESTRATOR DESCRIPTOR (geometric text for LLM prompt)
+# ---------------------------------------------------------------------------
+
+def compute_shape_signature(observable_positions: List[Tuple[float, float]]) -> Dict:
+    """
+    Compute geometric descriptors for the orchestrator's decision prompt.
+
+    Returns a dict with tangent_angles, curvature_signs, total_turning_angle,
+    tip_position, and n_nodes — the same fields expected by orchestrator_agent.py.
     """
     if len(observable_positions) < 2:
         return {}
 
     obs = np.array(observable_positions)
 
-    # Tangent angles at each node (CCW from -Y axis)
-    tangents = []
-    for i in range(len(obs) - 1):
-        dx = obs[i + 1][0] - obs[i][0]
-        dy = obs[i + 1][1] - obs[i][1]
-        angle = np.arctan2(dx, -dy)  # CCW from -Y axis
-        tangents.append(float(angle))
+    dx = np.diff(obs[:, 0])
+    dy = np.diff(obs[:, 1])
+    tangents = list(np.arctan2(dx, -dy).astype(float))
 
-    # Curvature signs: sign of change in tangent angle
-    curvature_signs = []
-    for i in range(len(tangents) - 1):
-        dangle = tangents[i + 1] - tangents[i]
-        # Wrap to [-π, π]
-        while dangle > np.pi:
-            dangle -= 2 * np.pi
-        while dangle < -np.pi:
-            dangle += 2 * np.pi
-        sign = 1 if dangle > 1e-6 else (-1 if dangle < -1e-6 else 0)
-        curvature_signs.append(sign)
+    kappa = extract_turning_angles(observable_positions)
+    curvature_signs = [int(np.sign(k)) if abs(k) > 1e-6 else 0 for k in kappa]
 
-    # Total turning angle
-    total_turning = tangents[-1] - tangents[0]
+    total_turning = float(tangents[-1] - tangents[0])
     while total_turning > np.pi:
         total_turning -= 2 * np.pi
     while total_turning < -np.pi:
         total_turning += 2 * np.pi
 
     return {
-        "tangent_angles": tangents,
-        "curvature_signs": curvature_signs,
-        "total_turning_angle": float(total_turning),
-        "tip_position": tuple(obs[-1]),
-        "n_nodes": len(obs),
-    }
-
-
-def _curvature_pattern_match(computed_signs: List[int], expected_pattern: List[int], tolerance: float = 0.3) -> float:
-    """
-    Score curvature pattern match (0-100%, lower is better error).
-
-    Zeros (straight segments) are excluded from the fraction computation so
-    that shapes like L (straight + curved) score correctly.
-
-    Two-element pattern (e.g. [1, -1] for S-shape): checks that BOTH curvature
-    directions are present in roughly equal proportion (min fraction >= 0.3).
-
-    Single-element pattern (e.g. [1] for C): checks that the dominant nonzero
-    sign matches, and that it makes up >= ~70% of nonzero signs.
-    """
-    nonzero = [s for s in computed_signs if s != 0]
-    if not nonzero:
-        return 0.0     # all straight — no curvature mismatch
-
-    n = len(nonzero)
-    pos_count = sum(1 for s in nonzero if s > 0)
-    neg_count = sum(1 for s in nonzero if s < 0)
-
-    if len(expected_pattern) > 1:
-        # S-shape style: both curvature directions must be present
-        min_frac = min(pos_count, neg_count) / n
-        # Perfect: 50/50 split. Error grows as split becomes more one-sided.
-        threshold = 0.3
-        error_percent = max(0.0, (threshold - min_frac) / threshold * 100)
-        return min(error_percent, 100.0)
-
-    expected_sign = expected_pattern[0] if expected_pattern else 0
-    if expected_sign == 0:
-        return 0.0
-
-    n_matching = sum(1 for s in nonzero if s == expected_sign)
-    match_fraction = n_matching / n
-
-    if match_fraction >= 0.7:
-        error_percent = (1.0 - match_fraction) * 50
-    else:
-        error_percent = 100.0 - match_fraction * 100
-
-    return min(error_percent, 100.0)
-
-
-def _turning_angle_error(computed_angle: float, expected_angle: float, tolerance: float = 0.3) -> float:
-    """
-    Score turning angle error.
-
-    Tolerance is fractional deviation allowed (e.g., 0.3 = 30% ok).
-    """
-    if abs(expected_angle) < 1e-6:
-        return 0.0 if abs(computed_angle) < 1e-6 else 100.0
-
-    angle_error = abs(computed_angle - expected_angle) / abs(expected_angle)
-
-    # If within tolerance, error is proportional; else capped at 100
-    if angle_error <= tolerance:
-        error_percent = (angle_error / tolerance) * 50
-    else:
-        error_percent = 50 + min((angle_error - tolerance) / tolerance * 50, 50)
-
-    return min(error_percent, 100.0)
-
-
-def _wall_contact_error(observable_positions: List[Tuple[float, float]], wall_h: float, expected_fraction: float, tolerance: float = 0.2) -> float:
-    """
-    Score wall contact fraction error.
-
-    Count nodes within tolerance of wall_h, compare to expected fraction.
-    """
-    obs = np.array(observable_positions)
-    y_coords = obs[:, 1]
-
-    # Nodes touching wall: within 0.005 m of wall_h
-    contact_tol = 0.005
-    touching = np.sum(np.abs(y_coords - wall_h) < contact_tol)
-    contact_fraction = touching / len(y_coords) if len(y_coords) > 0 else 0
-
-    # Error in contact fraction
-    contact_error = abs(contact_fraction - expected_fraction)
-
-    if contact_error <= tolerance:
-        error_percent = (contact_error / tolerance) * 50
-    else:
-        error_percent = 50 + min((contact_error - tolerance) / tolerance * 50, 50)
-
-    return min(error_percent, 100.0)
-
-
-def _symmetry_error(observable_positions: List[Tuple[float, float]]) -> float:
-    """
-    Score symmetry deviation for shapes like U.
-
-    Compute left-right symmetry around the center x.
-    """
-    obs = np.array(observable_positions)
-    n = len(obs)
-
-    if n < 3:
-        return 50.0
-
-    # Check left-right symmetry: mirror image around center x
-    center_x = (obs[0, 0] + obs[-1, 0]) / 2
-
-    # Compute deviation from symmetry
-    sym_error = 0.0
-    for i in range(n // 2):
-        left_node = obs[i]
-        right_node = obs[n - 1 - i]
-
-        # Mirror position of left node
-        mirrored_left_x = 2 * center_x - left_node[0]
-
-        # Distance between mirrored and actual right node
-        dist = np.sqrt((right_node[0] - mirrored_left_x) ** 2 + (right_node[1] - left_node[1]) ** 2)
-        sym_error += dist
-
-    # Normalize by beam extent
-    extent = np.linalg.norm(obs[-1] - obs[0])
-    if extent < 1e-6:
-        return 50.0
-
-    normalized_error = (sym_error / (n // 2)) / extent
-    error_percent = min(normalized_error * 100, 100.0)
-
-    return error_percent
-
-
-# Shape specifications.
-# Turning angles and contact fractions are calibrated against the ideal synthetic
-# shapes in src/tests/test_shape_checker.py, which use arc-length parametrisation.
-# Real beam data will score against these references — deviation from the ideal
-# registers as nonzero error.
-SHAPE_SPECS = {
-    "C": {
-        "curvature_pattern": [1],         # all positive (curves right)
-        "expected_turning_angle": 0.6955, # calibrated: R=0.15 arc to wall
-        "expected_wall_contact_fraction": 0.2,
-        "wall_contact_tolerance": 0.15,
-        "symmetry_required": False,
-        "weights": {"curvature": 0.50, "angle": 0.35, "contact": 0.15, "symmetry": 0.0},
-    },
-    "U": {
-        "curvature_pattern": [-1],        # all negative (single-direction semicircle)
-        "expected_turning_angle": -2.618, # calibrated: semicircle R=0.12
-        "expected_wall_contact_fraction": 0.1429,
-        "wall_contact_tolerance": 0.15,
-        "symmetry_required": True,
-        "weights": {"curvature": 0.35, "angle": 0.30, "contact": 0.15, "symmetry": 0.20},
-    },
-    "S": {
-        "curvature_pattern": [1, -1],     # both directions present (alternating)
-        "expected_turning_angle": 0.0,    # calibrated: net zero rotation
-        "expected_wall_contact_fraction": 0.0,
-        "wall_contact_tolerance": 0.5,
-        "symmetry_required": False,
-        "weights": {"curvature": 0.60, "angle": 0.25, "contact": 0.15, "symmetry": 0.0},
-    },
-    "L": {
-        "curvature_pattern": [1],         # positive curvature at the bend
-        "expected_turning_angle": 1.309,  # calibrated: 90° arc R=0.08
-        "expected_wall_contact_fraction": 0.1667,
-        "wall_contact_tolerance": 0.15,
-        "symmetry_required": False,
-        "weights": {"curvature": 0.45, "angle": 0.40, "contact": 0.15, "symmetry": 0.0},
-    },
-}
-
-
-def compute_shape_error(observable_positions: List[Tuple[float, float]], target_shape: str, wall_h: float = -0.12) -> Dict:
-    """
-    Compute normalized shape error (0-100%, where 0 = perfect match).
-
-    Args:
-        observable_positions: List of (x, y) node positions
-        target_shape: "C", "U", "S", or "L"
-        wall_h: Wall position (y-coordinate)
-
-    Returns:
-        Dict with:
-          - overall_error_percent: 0-100, lower is better match
-          - match_confidence_percent: 100 - overall_error, for LLM consumption
-          - breakdown: dict of individual error components
-          - diagnostics: human-readable explanation
-          - signature: computed shape signature
-    """
-    if target_shape not in SHAPE_SPECS:
-        return {
-            "overall_error_percent": 100.0,
-            "match_confidence_percent": 0.0,
-            "breakdown": {},
-            "diagnostics": f"Unknown target shape: {target_shape}",
-            "signature": {},
-        }
-
-    spec = SHAPE_SPECS[target_shape]
-    sig = compute_shape_signature(observable_positions)
-
-    if not sig:
-        return {
-            "overall_error_percent": 100.0,
-            "match_confidence_percent": 0.0,
-            "breakdown": {},
-            "diagnostics": "Insufficient nodes to compute signature",
-            "signature": sig,
-        }
-
-    # Compute individual error components
-    curvature_error = _curvature_pattern_match(sig["curvature_signs"], spec["curvature_pattern"])
-    angle_error = _turning_angle_error(sig["total_turning_angle"], spec["expected_turning_angle"], tolerance=0.4)
-    contact_error = _wall_contact_error(observable_positions, wall_h, spec["expected_wall_contact_fraction"], tolerance=spec.get("wall_contact_tolerance", 0.25))
-
-    symmetry_error = 0.0
-    if spec.get("symmetry_required"):
-        symmetry_error = _symmetry_error(observable_positions)
-
-    # Weighted composite error
-    weights = spec["weights"]
-    overall_error = (
-        weights["curvature"] * curvature_error +
-        weights["angle"] * angle_error +
-        weights["contact"] * contact_error +
-        weights["symmetry"] * symmetry_error
-    )
-    overall_error = min(overall_error, 100.0)
-
-    # Diagnostics
-    diag_parts = []
-    if curvature_error > 30:
-        diag_parts.append("curvature pattern doesn't match target")
-    if angle_error > 30:
-        diag_parts.append("rotation angle is off")
-    if contact_error > 30:
-        diag_parts.append("wall contact is insufficient")
-    if symmetry_error > 30 and spec.get("symmetry_required"):
-        diag_parts.append("shape is not symmetric enough")
-
-    if diag_parts:
-        diagnostics = f"Issues: {', '.join(diag_parts)}"
-    else:
-        diagnostics = "Shape matches target well."
-
-    return {
-        "overall_error_percent": float(overall_error),
-        "match_confidence_percent": float(100.0 - overall_error),
-        "breakdown": {
-            "curvature": float(curvature_error),
-            "turning_angle": float(angle_error),
-            "wall_contact": float(contact_error),
-            "symmetry": float(symmetry_error),
-        },
-        "diagnostics": diagnostics,
-        "signature": sig,
+        "tangent_angles":    tangents,
+        "curvature_signs":   curvature_signs,
+        "total_turning_angle": total_turning,
+        "tip_position":      tuple(obs[-1]),
+        "n_nodes":           len(obs),
     }
