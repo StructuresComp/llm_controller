@@ -68,9 +68,9 @@ VISC        = 1000.0   # viscous damping coefficient (Pa·s)
 # 2b. Environment
 # ---------------------------------------------------------------------------
 WALL_H                  = -0.12  # wall position: wall sits at y = WALL_H (m); must satisfy |WALL_H| > ROD_LENGTH
-BOUNDARY_VELOCITY       = 0.01   # translational speed of node 0 (m/s)
-BOUNDARY_ANGLE_VELOCITY = 0.01   # rotational speed of node 0 (rad/s)
-DT                      = 0.01   # time step size for physics integration (s); smaller = more accurate but slower
+BOUNDARY_VELOCITY       = 0.05   # translational speed of node 0 (m/s)
+BOUNDARY_ANGLE_VELOCITY = 0.05   # rotational speed of node 0 (rad/s)
+DT                      = 0.001   # time step size for physics integration (s); smaller = more accurate but slower
 FRICTION                = True  # True = wall fixes x and y; False = wall fixes y only (frictionless)
 
 # ---------------------------------------------------------------------------
@@ -101,6 +101,8 @@ K_HISTORY  = 5    # number of (shape, BC) pairs kept in rolling history
 # ---------------------------------------------------------------------------
 # 3c. Control loop
 # ---------------------------------------------------------------------------
+CHECK_SHAPE_REFLECTION = False  # if True, also test reversed traversal and take min error
+
 ORCHESTRATOR_MODE = "plan"   # "plan" (grounded) or "myopic" (reactive)
 ALLOW_REPLAN      = False    # if True, orchestrator can discard and redo the plan
 MAX_ITERATIONS    = 50       # hard stop on orchestrator → programmer cycles

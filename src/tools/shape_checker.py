@@ -1,55 +1,60 @@
 # ---------------------------------------------------------------------------
 # src/tools/shape_checker.py
 # ---------------------------------------------------------------------------
-# Deterministic shape validator based on discrete curvature (DDG).
+# Deterministic shape validator (DDG-informed).
 #
-# Core idea: a discrete curve is fully described by the turning-angle sequence
-#   κ_i = θ_{i+1} − θ_i   at each interior node
-# This is invariant to rigid-body translation and rotation.
-# Wall position, absolute coordinates, and symmetry in XY are irrelevant.
+# Core principle
+# --------------
+# A beam shape is fully described by how its tangent angle θ changes along
+# arc-length s ∈ [0, 1].  Each target shape defines an *ideal θ profile*
+# θ*(s', params) where s' is normalised arc-length and θ*(0) ≡ 0 (relative
+# to the start tangent).  We fit the free parameters to the provided shape,
+# reconstruct the ideal geometry in the same coordinate frame, and report
+# the normalised RMS node distance as the error.
+#
+# This is invariant to rigid-body translation and rotation by construction.
+# A CONFIG flag enables reflection checking (swap which end is s=0).
+#
+# Consistency rule
+# ----------------
+# Both shape generation (test file) and ideal reconstruction use the same
+# integration scheme: one step per edge, edge direction = θ*(s_edge, params).
+# This guarantees exact round-trip (0 % error) for ideal test shapes.
 #
 # Section order:
 #   1. Imports
-#   2. Primitives      — extract_turning_angles, integrate_kappa
-#   3. Ideal profiles  — one function per shape type
-#   4. Error functions — one function per shape type
-#   5. Public API      — compute_shape_error, reconstruct_ideal
-#   6. Orchestrator    — compute_shape_signature (text descriptor for LLM)
+#   2. Primitives          — extract_turning_angles, integrate_kappa (kept for LLM descriptor)
+#   3. Theta profiles      — θ*(s', **params) functions and param-fitting functions
+#   4. Build ideal         — build_ideal_from_edge_profile, _build_ideal_one_dir
+#   5. Public API          — compute_shape_error, reconstruct_ideal
+#   6. Orchestrator        — compute_shape_signature (text descriptor for LLM prompt)
 # ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 # 1. IMPORTS
 # ---------------------------------------------------------------------------
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Callable
 
 
 # ---------------------------------------------------------------------------
-# 2. PRIMITIVES
+# 2. PRIMITIVES  (kept for the LLM geometric descriptor)
 # ---------------------------------------------------------------------------
 
 def extract_turning_angles(nodes: List[Tuple[float, float]]) -> np.ndarray:
     """
-    Compute discrete curvature κ_i = θ_{i+1} − θ_i at each interior node.
-
-    θ_i is the tangent angle of edge i, measured counter-clockwise from the
-    −Y axis:  θ = arctan2(dx, −dy).
-
-    Returns array of length N−2 (N = number of nodes).
-    Invariant to rigid-body translation and rotation.
+    Discrete curvature κ_i = θ_{i+1} − θ_i at each interior node.
+    Invariant to translation and rotation.  Returns array of length N−2.
     """
     obs = np.array(nodes)
-    N = len(obs)
-    if N < 3:
+    if len(obs) < 3:
         return np.array([])
-
     dx = np.diff(obs[:, 0])
     dy = np.diff(obs[:, 1])
-    theta = np.arctan2(dx, -dy)         # CCW from −Y, length N−1
-
-    kappa = np.diff(theta)              # length N−2
-    kappa = (kappa + np.pi) % (2 * np.pi) - np.pi  # wrap to (−π, π]
-    return kappa
+    theta = np.arctan2(dx, -dy)
+    kappa = np.diff(theta)
+    return (kappa + np.pi) % (2 * np.pi) - np.pi
 
 
 def integrate_kappa(
@@ -58,130 +63,204 @@ def integrate_kappa(
     start_pos: Tuple[float, float] = (0.0, 0.0),
     start_angle: float = 0.0,
 ) -> List[Tuple[float, float]]:
-    """
-    Reconstruct node positions from a turning-angle sequence.
-
-    N = len(kappa) + 2 nodes, uniform edge length ds = arc_length / (N−1).
-    start_angle is the tangent angle of the first edge (CCW from −Y).
-
-    Inverse of extract_turning_angles (exact round-trip for uniform spacing).
-    """
+    """Reconstruct N = len(kappa)+2 nodes from a turning-angle sequence."""
     N = len(kappa) + 2
     ds = arc_length / (N - 1)
-
     nodes = [(float(start_pos[0]), float(start_pos[1]))]
-    x, y = float(start_pos[0]), float(start_pos[1])
-    theta = float(start_angle)
-
+    x, y, theta = float(start_pos[0]), float(start_pos[1]), float(start_angle)
     for i in range(N - 1):
-        x = x + ds * np.sin(theta)
-        y = y - ds * np.cos(theta)
+        x += ds * np.sin(theta)
+        y -= ds * np.cos(theta)
         nodes.append((x, y))
         if i < N - 2:
             theta += float(kappa[i])
-
     return nodes
 
 
 # ---------------------------------------------------------------------------
-# 3. IDEAL κ PROFILES
+# 3. THETA PROFILES  θ*(s', **params)
+#
+# Convention
+# ----------
+# s' ∈ [0, 1]  is normalised arc-length measured from the first edge midpoint
+# (s'=0) to the last edge midpoint (s'=1).  θ*(0) ≡ 0 by convention; the
+# returned value is the *relative* turning from the start tangent direction.
+#
+# Free parameters are fitted by matching θ*(s'_i, params) ≈ Δθ_i where Δθ_i
+# is the provided tangent angle at edge i minus the tangent at edge 0.
 # ---------------------------------------------------------------------------
 
-def _ideal_kappa_c(kappa: np.ndarray) -> np.ndarray:
-    """C: best-fit constant curvature (circular arc)."""
-    return np.full(len(kappa), np.mean(kappa))
+# --- profile functions ---
+
+def _profile_c(s_norm: np.ndarray, total_turn: float = 1.0) -> np.ndarray:
+    """C: linear ramp — constant curvature (circular arc)."""
+    return total_turn * s_norm
 
 
-def _ideal_kappa_u(kappa: np.ndarray) -> np.ndarray:
-    """U: constant curvature, total turn fixed at ±π."""
-    sign = float(np.sign(np.sum(kappa))) or 1.0
-    return np.full(len(kappa), sign * np.pi / len(kappa))
+def _profile_u(s_norm: np.ndarray, total_turn: float = np.pi) -> np.ndarray:
+    """U: linear ramp to ±π — semicircle."""
+    return total_turn * s_norm
 
 
-def _ideal_kappa_s(kappa: np.ndarray) -> np.ndarray:
-    """S: antisymmetric profile scaled to match the total absolute turning."""
-    N = len(kappa)
-    mid = N // 2
-    profile = np.zeros(N)
-    profile[:mid] = 1.0
-    profile[N - mid:] = -1.0                            # middle = 0 for odd N
-    n_nonzero = float(np.sum(np.abs(profile))) or 1.0
-    scale = np.sum(np.abs(kappa)) / n_nonzero
-    return profile * scale
+def _profile_s(s_norm: np.ndarray, amplitude: float = 0.5) -> np.ndarray:
+    """S: half-sine bump — beam curves one way then back, net turn = 0."""
+    return amplitude * np.sin(np.pi * s_norm)
 
 
-def _ideal_kappa_l(kappa: np.ndarray) -> np.ndarray:
-    """L: all turning concentrated at the node with largest |κ|."""
-    ideal = np.zeros(len(kappa))
-    i_max = int(np.argmax(np.abs(kappa)))
-    ideal[i_max] = float(np.sum(kappa))
-    return ideal
+def _profile_l(
+    s_norm: np.ndarray,
+    total_turn: float = np.pi / 2,
+    turn_at: float = 0.7,
+) -> np.ndarray:
+    """L: step function — straight section then abrupt turn."""
+    return np.where(s_norm >= turn_at, float(total_turn), 0.0)
 
 
-_IDEAL_FN: Dict = {
-    "C": _ideal_kappa_c,
-    "U": _ideal_kappa_u,
-    "S": _ideal_kappa_s,
-    "L": _ideal_kappa_l,
+THETA_PROFILES: Dict[str, Callable] = {
+    "C": _profile_c,
+    "U": _profile_u,
+    "S": _profile_s,
+    "L": _profile_l,
+}
+
+
+# --- fitting functions ---
+# Each returns a dict of params that can be passed to the corresponding profile.
+
+def _fit_c(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
+    """Least-squares fit of total_turn for a linear ramp."""
+    denom = float(np.dot(s_norm, s_norm)) + 1e-12
+    return {"total_turn": float(np.dot(s_norm, dtheta) / denom)}
+
+
+def _fit_u(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
+    """U is π, but fit the sign from the data's dominant turning direction."""
+    sign = float(np.sign(dtheta[-1])) if len(dtheta) > 0 else 1.0
+    return {"total_turn": (sign or 1.0) * np.pi}
+
+
+def _fit_s(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
+    """Project onto sin(π s') to find the S amplitude."""
+    basis = np.sin(np.pi * s_norm)
+    denom = float(np.dot(basis, basis)) + 1e-12
+    return {"amplitude": float(np.dot(dtheta, basis) / denom)}
+
+
+def _fit_l(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
+    """Grid-search for the step location; total turn from the last edge."""
+    total_turn = float(dtheta[-1])
+    best_rms, best_turn_at = np.inf, 0.7
+    for t in np.linspace(0.05, 0.95, 19):
+        residual = dtheta - np.where(s_norm >= t, total_turn, 0.0)
+        rms = float(np.sqrt(np.mean(residual ** 2)))
+        if rms < best_rms:
+            best_rms, best_turn_at = rms, t
+    return {"total_turn": total_turn, "turn_at": float(best_turn_at)}
+
+
+_FIT_FNS: Dict[str, Callable] = {
+    "C": _fit_c,
+    "U": _fit_u,
+    "S": _fit_s,
+    "L": _fit_l,
 }
 
 
 # ---------------------------------------------------------------------------
-# 4. ERROR FUNCTIONS  (0–100 %, lower = better)
+# 4. BUILD IDEAL SHAPE
 # ---------------------------------------------------------------------------
 
-def _c_error(kappa: np.ndarray) -> float:
+def build_ideal_from_edge_profile(
+    profile_fn: Callable,
+    n: int,
+    arc_length: float,
+    start_pos: Tuple[float, float] = (0.0, 0.0),
+    start_angle: float = 0.0,
+    **params,
+) -> List[Tuple[float, float]]:
     """
-    C: constant curvature.  Error = coefficient of variation (std / |mean|).
-    0 % for a perfect circle of any radius; 100 % for an irregular curve.
+    Generate n nodes by integrating a θ* profile at edge midpoints.
+
+    Used in the test file to create synthetic ideal shapes.  The edge-midpoint
+    integration is the same scheme used by _build_ideal_one_dir, so generation
+    and evaluation are exactly consistent → 0 % RMS error for ideal shapes.
+
+    s' is computed as (s_edge − s_edge_0) / span, i.e. the first edge midpoint
+    maps to s'=0 and the last to s'=1.
     """
-    mean_k = float(np.mean(kappa))
-    if abs(mean_k) < 1e-8:
-        return 100.0
-    return min(float(np.std(kappa)) / abs(mean_k) * 100.0, 100.0)
+    ds = arc_length / (n - 1)
+    s_nodes = np.linspace(0.0, 1.0, n)
+    s_edges = (s_nodes[:-1] + s_nodes[1:]) / 2.0       # midpoints, length n-1
+
+    s0 = s_edges[0]
+    span = s_edges[-1] - s0 + 1e-12
+    s_norm = (s_edges - s0) / span                       # ∈ [0, 1]
+
+    dtheta_edges = profile_fn(s_norm, **params)
+    theta_edges = start_angle + dtheta_edges
+
+    nodes = [(float(start_pos[0]), float(start_pos[1]))]
+    x, y = float(start_pos[0]), float(start_pos[1])
+    for theta_e in theta_edges:
+        x += ds * float(np.sin(theta_e))
+        y -= ds * float(np.cos(theta_e))
+        nodes.append((x, y))
+    return nodes
 
 
-def _u_error(kappa: np.ndarray) -> float:
+def _build_ideal_one_dir(
+    obs: np.ndarray,
+    target_shape: str,
+) -> Tuple[List[Tuple[float, float]], float, dict]:
     """
-    U: constant curvature AND total turning ≈ ±π.
-    Combines CV (uniformity) with a turning-angle penalty.
+    Fit and reconstruct the ideal shape for one traversal direction.
+
+    Returns (ideal_nodes, rms_normalised, fitted_params).
+    rms_normalised = RMSE(ideal − provided) / arc_length.
     """
-    mean_k = abs(float(np.mean(kappa)))
-    if mean_k < 1e-8:
-        return 100.0
-    cv = float(np.std(kappa)) / mean_k
-    angle_err = abs(abs(float(np.sum(kappa))) - np.pi) / np.pi
-    return min((0.5 * cv + 0.5 * angle_err) * 100.0, 100.0)
+    N = len(obs)
+    edge_vecs = np.diff(obs, axis=0)                    # (N-1, 2)
+    edge_lengths = np.linalg.norm(edge_vecs, axis=1)
+    arc_length = float(np.sum(edge_lengths))
+    if arc_length < 1e-10 or N < 3:
+        return obs.tolist(), 0.0, {}
 
+    # Arc-length at node positions, normalised to [0, 1]
+    s_nodes = np.zeros(N)
+    s_nodes[1:] = np.cumsum(edge_lengths) / arc_length
 
-def _s_error(kappa: np.ndarray) -> float:
-    """
-    S: antisymmetric κ sequence (κ_i ≈ −κ_{N−1−i}) and net turn ≈ 0.
-    Error = mean |κ + reverse(κ)| normalised by mean |κ|.
-    """
-    residual = float(np.mean(np.abs(kappa + kappa[::-1])))
-    scale = float(np.mean(np.abs(kappa))) + 1e-8
-    return min(residual / scale * 50.0, 100.0)
+    # Arc-length at edge midpoints
+    s_edges = (s_nodes[:-1] + s_nodes[1:]) / 2.0
 
+    # Shift so s'=0 at the first edge midpoint, s'=1 at the last
+    s0 = s_edges[0]
+    span = s_edges[-1] - s0 + 1e-12
+    s_norm = (s_edges - s0) / span                       # ∈ [0, 1], length N-1
 
-def _l_error(kappa: np.ndarray) -> float:
-    """
-    L: curvature concentrated at a single interior node.
-    Error = 1 − (max|κ| / Σ|κ|), scaled to 0–100 %.
-    """
-    total = float(np.sum(np.abs(kappa)))
-    if total < 1e-8:
-        return 100.0
-    concentration = float(np.max(np.abs(kappa))) / total
-    return min((1.0 - concentration) * 100.0, 100.0)
+    # Provided relative turning angle at each edge (Δθ_i = θ_i − θ_0)
+    theta_edges = np.arctan2(edge_vecs[:, 0], -edge_vecs[:, 1])
+    theta_start = float(theta_edges[0])
+    dtheta = (theta_edges - theta_start + np.pi) % (2 * np.pi) - np.pi
 
+    # Fit profile parameters to the provided relative tangent data
+    params = _FIT_FNS[target_shape](s_norm, dtheta)
 
-_ERROR_FN: Dict = {
-    "C": _c_error,
-    "U": _u_error,
-    "S": _s_error,
-    "L": _l_error,
-}
+    # Ideal relative tangent at each edge
+    dtheta_ideal = THETA_PROFILES[target_shape](s_norm, **params)
+    theta_ideal_edges = theta_start + dtheta_ideal
+
+    # Reconstruct ideal nodes using same edge-midpoint integration
+    ideal = np.empty((N, 2))
+    ideal[0] = obs[0]
+    for i in range(N - 1):
+        ds = float(edge_lengths[i])
+        ideal[i + 1, 0] = ideal[i, 0] + ds * np.sin(float(theta_ideal_edges[i]))
+        ideal[i + 1, 1] = ideal[i, 1] - ds * np.cos(float(theta_ideal_edges[i]))
+
+    # Normalised RMSE
+    rms = float(np.sqrt(np.mean(np.sum((ideal - obs) ** 2, axis=1)))) / arc_length
+
+    return ideal.tolist(), rms, params
 
 
 # ---------------------------------------------------------------------------
@@ -191,110 +270,94 @@ _ERROR_FN: Dict = {
 def compute_shape_error(
     nodes: List[Tuple[float, float]],
     target_shape: str,
+    check_reflection: bool = None,
 ) -> Dict:
     """
-    Compute normalised shape error (0–100 %, 0 = perfect match).
-
-    Invariant to translation, rotation, and CW/CCW orientation (the error
-    functions are all symmetric under κ → −κ for the shapes defined here).
+    Fit the ideal θ profile for target_shape to the provided nodes and
+    return the normalised RMS node error (0 % = perfect, 100 % = one rod
+    length of average deviation).
 
     Args:
-        nodes:        List of (x, y) node positions (any number ≥ 3).
-        target_shape: "C", "U", "S", or "L".
-
-    Returns dict with:
-        error_percent      — 0 (perfect) to 100 (wrong shape)
-        confidence_percent — 100 − error_percent
-        kappa_provided     — extracted turning angles
-        kappa_ideal        — best-fit ideal turning angles
-        ideal_nodes        — ideal shape anchored to nodes[0] (for overlay)
-        diagnostics        — one-line explanation
+        nodes:            List of (x, y) positions (N ≥ 3).
+        target_shape:     "C", "U", "S", or "L".
+        check_reflection: If True also try reversed traversal and keep the
+                          lower error.  Defaults to config.CHECK_SHAPE_REFLECTION.
     """
-    if target_shape not in _ERROR_FN:
+    if check_reflection is None:
+        try:
+            import config
+            check_reflection = bool(config.CHECK_SHAPE_REFLECTION)
+        except Exception:
+            check_reflection = False
+
+    if target_shape not in THETA_PROFILES:
         return {
-            "error_percent": 100.0, "confidence_percent": 0.0,
-            "kappa_provided": [], "kappa_ideal": [], "ideal_nodes": [],
+            "error_percent": 100.0,
+            "confidence_percent": 0.0,
+            "ideal_nodes": [],
+            "rms_normalized": 1.0,
+            "fitted_params": {},
             "diagnostics": f"Unknown target shape: {target_shape}",
         }
 
-    kappa = extract_turning_angles(nodes)
-    if len(kappa) == 0:
+    obs = np.array(nodes)
+    if len(obs) < 3:
         return {
-            "error_percent": 100.0, "confidence_percent": 0.0,
-            "kappa_provided": [], "kappa_ideal": [], "ideal_nodes": [],
+            "error_percent": 100.0,
+            "confidence_percent": 0.0,
+            "ideal_nodes": [],
+            "rms_normalized": 1.0,
+            "fitted_params": {},
             "diagnostics": "Need at least 3 nodes.",
         }
 
-    error = float(_ERROR_FN[target_shape](kappa))
-    kappa_ideal = _IDEAL_FN[target_shape](kappa)
-    ideal_nodes = reconstruct_ideal(nodes, kappa_ideal)
-    diagnostics = _diagnose(target_shape, error, kappa)
+    ideal_fwd, rms_fwd, params_fwd = _build_ideal_one_dir(obs, target_shape)
+    best_ideal, best_rms, best_params = ideal_fwd, rms_fwd, params_fwd
+
+    if check_reflection:
+        ideal_rev, rms_rev, params_rev = _build_ideal_one_dir(obs[::-1], target_shape)
+        if rms_rev < best_rms:
+            # Reverse the ideal nodes back to original order for display
+            best_ideal = ideal_rev[::-1]
+            best_rms = rms_rev
+            best_params = params_rev
+
+    error_percent = min(best_rms * 100.0, 100.0)
 
     return {
-        "error_percent": error,
-        "confidence_percent": 100.0 - error,
-        "kappa_provided": kappa.tolist(),
-        "kappa_ideal": kappa_ideal.tolist(),
-        "ideal_nodes": ideal_nodes,
-        "diagnostics": diagnostics,
+        "error_percent": error_percent,
+        "confidence_percent": 100.0 - error_percent,
+        "ideal_nodes": best_ideal,
+        "rms_normalized": best_rms,
+        "fitted_params": best_params,
+        "diagnostics": _diagnose(target_shape, error_percent, best_params),
     }
 
 
-def reconstruct_ideal(
-    nodes: List[Tuple[float, float]],
-    kappa_ideal: np.ndarray,
-) -> List[Tuple[float, float]]:
-    """
-    Reconstruct the ideal shape in the coordinate frame of the provided shape.
-
-    Anchors to nodes[0] (position) and the direction of edge 0 (tangent angle),
-    then integrates kappa_ideal forward with uniform arc-length spacing.
-    """
-    obs = np.array(nodes)
-    start_pos = (float(obs[0, 0]), float(obs[0, 1]))
-    dx0 = obs[1, 0] - obs[0, 0]
-    dy0 = obs[1, 1] - obs[0, 1]
-    start_angle = float(np.arctan2(dx0, -dy0))
-    arc_length = float(np.sum(np.sqrt(np.sum(np.diff(obs, axis=0) ** 2, axis=1))))
-    return integrate_kappa(kappa_ideal, arc_length, start_pos, start_angle)
-
-
-def _diagnose(target_shape: str, error: float, kappa: np.ndarray) -> str:
-    if error < 2.0:
+def _diagnose(target_shape: str, error_percent: float, params: dict) -> str:
+    if error_percent < 2.0:
         return f"Shape matches {target_shape} well."
-
-    cv = float(np.std(kappa)) / (abs(float(np.mean(kappa))) + 1e-8)
-    total = float(abs(np.sum(kappa)))
-
-    if target_shape == "C":
-        return f"Curvature not uniform (CV={cv:.2f}); C needs constant κ."
-    if target_shape == "U":
-        return f"Total turning {total:.2f} rad (need π={np.pi:.2f}) or CV={cv:.2f} too high."
-    if target_shape == "S":
-        res = float(np.mean(np.abs(kappa + kappa[::-1]))) / (float(np.mean(np.abs(kappa))) + 1e-8)
-        return f"Antisymmetry residual {res:.2f} (want 0)."
-    if target_shape == "L":
-        conc = float(np.max(np.abs(kappa))) / (float(np.sum(np.abs(kappa))) + 1e-8)
-        return f"Curvature concentration {conc:.2f} (want ~1.0)."
-    return f"Error: {error:.1f}%."
+    detail = {k: f"{v:.3f}" for k, v in params.items()}
+    return f"{target_shape} fit params: {detail}  →  {error_percent:.1f}% error."
 
 
 # ---------------------------------------------------------------------------
-# 6. ORCHESTRATOR DESCRIPTOR (geometric text for LLM prompt)
+# 6. ORCHESTRATOR DESCRIPTOR  (geometric text for LLM prompt)
 # ---------------------------------------------------------------------------
 
-def compute_shape_signature(observable_positions: List[Tuple[float, float]]) -> Dict:
+def compute_shape_signature(
+    observable_positions: List[Tuple[float, float]],
+) -> Dict:
     """
     Compute geometric descriptors for the orchestrator's decision prompt.
 
-    Returns a dict with tangent_angles, curvature_signs, total_turning_angle,
-    tip_position, and n_nodes — the same fields expected by orchestrator_agent.py.
+    Returns tangent_angles, curvature_signs, total_turning_angle,
+    tip_position, n_nodes — the same keys expected by orchestrator_agent.py.
     """
     if len(observable_positions) < 2:
         return {}
 
     obs = np.array(observable_positions)
-
     dx = np.diff(obs[:, 0])
     dy = np.diff(obs[:, 1])
     tangents = list(np.arctan2(dx, -dy).astype(float))
@@ -309,9 +372,9 @@ def compute_shape_signature(observable_positions: List[Tuple[float, float]]) -> 
         total_turning += 2 * np.pi
 
     return {
-        "tangent_angles":    tangents,
-        "curvature_signs":   curvature_signs,
+        "tangent_angles":     tangents,
+        "curvature_signs":    curvature_signs,
         "total_turning_angle": total_turning,
-        "tip_position":      tuple(obs[-1]),
-        "n_nodes":           len(obs),
+        "tip_position":       tuple(obs[-1]),
+        "n_nodes":            len(obs),
     }
