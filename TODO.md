@@ -124,23 +124,80 @@ Both modes implemented. `"plan"` is the default.
 
 ---
 
-## 12. Deterministic shape checker (`src/evaluation/shape_checker.py`)
+## 12. Deterministic shape checker — rewrite (`src/tools/shape_checker.py`)
 
-Geometric ground-truth validator independent of LLM convergence assessment. Used in the evaluation harness (item 13) and for debugging LLM reliability.
+**Design principle (DDG-informed):**
+The shape of a discrete curve is fully encoded by the **discrete curvature sequence**
+κ_i = Δθ_i = θ_{i+1} − θ_i (turning angle at each interior node, wrapped to [−π, π]).
+This is invariant to rigid-body translation and rotation. Everything else — absolute
+positions, wall contact, symmetry in XY — is irrelevant to shape identity and must be
+removed from the error metric.
 
-- [ ] Compute shape signature from observable nodes:
-  - [ ] Curvature sign pattern (sequence of +1, 0, -1)
-  - [ ] Total turning angle (net rotation from first to last node)
-  - [ ] Symmetry metrics (if applicable: e.g., for U or C shapes)
-  - [ ] Wall contact count and position
-- [ ] Target shape definitions:
-  - [ ] **C**: strong left curve, tip near wall, opening to the right
-  - [ ] **U**: two left-right curves, both ends down, symmetric or near-symmetric
-  - [ ] **S**: alternating left-right-left curves (or right-left-right)
-  - [ ] **L**: one 90° turn, sharp corner
-  - [ ] Tolerance thresholds for "close enough" match
-- [ ] API: `is_shape_match(observable_nodes, target_shape, tolerance=0.1) -> bool`
-- [ ] Return detailed mismatch report (which features don't match)
+**Step 1: Core primitives**
+- [ ] `extract_turning_angles(nodes) -> np.ndarray`
+  - Compute N−1 edge tangent angles θ_i = arctan2(dx_i, −dy_i) (CCW from −Y)
+  - Return κ_i = θ_{i+1} − θ_i wrapped to [−π, π], length N−2
+  - This is the only shape descriptor needed
+
+**Step 2: Ideal κ profiles (arc-length parametrised)**
+
+Each target shape is defined by a canonical κ*(s_i) profile over arc-length s ∈ [0,1].
+All shapes are invariant to overall scale (normalise by arc-length) and orientation
+(try both signs; take minimum error = CW vs CCW invariance).
+
+- [ ] C — constant curvature:
+  - κ*(s) = κ_0 (same value at every interior node)
+  - Best-fit κ_0 = mean(κ_provided); shape error = how far from constant
+  - Error metric: std(κ_provided) / |mean(κ_provided)| (coefficient of variation)
+
+- [ ] U — constant curvature, larger total turn (|Σκ| ≈ π):
+  - Same profile as C but |total_turning| ≈ π
+  - Error: CV of κ_provided + penalty for |total_turning| far from π
+
+- [ ] S — antisymmetric curvature profile:
+  - κ*(s_i) > 0 for i < (N−2)/2, < 0 for i ≥ (N−2)/2; total_turning ≈ 0
+  - Best-fit: mirror the κ sequence, compare to its own negated mirror
+  - Error metric: antisymmetry residual + penalty for |total_turning| > ε
+
+- [ ] L — concentrated curvature (delta-like):
+  - κ*(s_i) ≈ 0 for most i, large at one location
+  - Best-fit: find the single interior node with max |κ|; measure how concentrated
+  - Error metric: 1 − (max_κ / Σ|κ|) (how much of total turning is in one node)
+
+**Step 3: Orientation invariance**
+- [ ] For each target shape, compute error for both κ_provided and −κ_provided
+- [ ] Return the minimum (CW and CCW C-shapes are equally valid)
+
+**Step 4: Normalised error output (0–100 scale)**
+- [ ] `compute_shape_error(nodes, target_shape) -> dict` returns:
+  - `error_percent`: 0 = perfect, 100 = completely wrong
+  - `confidence_percent`: 100 − error_percent
+  - `best_orientation`: "CW" or "CCW" (which sign gave lower error)
+  - `kappa_provided`: the extracted κ sequence
+  - `kappa_ideal`: the best-fit ideal κ sequence (for plotting)
+  - `diagnostics`: one-line human-readable explanation
+
+**Step 5: Anchored ideal shape for visualisation**
+- [ ] `reconstruct_ideal(nodes, target_shape) -> list[tuple]`
+  - Start from node 0 of provided shape (position + tangent direction)
+  - Integrate κ*(s) forward using unit arc-length steps (same spacing as provided)
+  - Returns ideal node positions in the same coordinate frame → overlay on plot
+
+**Step 6: Test file rewrite (`src/tests/test_shape_checker.py`)**
+- [ ] Generate ideal shapes using `integrate_kappa(kappa_fn, n_nodes, arc_length, start_pos, start_angle)`
+  where kappa_fn is a function of arc-length index i
+- [ ] `create_c_shape(n, total_turn)` — constant κ = total_turn / (n−2)
+- [ ] `create_u_shape(n)` — same but total_turn = π
+- [ ] `create_s_shape(n, amp)` — antisymmetric κ profile, Σκ = 0
+- [ ] `create_l_shape(n, turn_at)` — κ concentrated at node turn_at
+- [ ] Verify: `compute_shape_error(shape, target)` returns 0% for ideal shapes
+- [ ] Plot: two panels — (left) κ_i profile comparison, (right) overlay of provided vs. ideal shape in XY
+- [ ] Remove all references to wall_h, contact_fraction, symmetry from tests
+
+**Step 7: Clean up `SHAPE_SPECS`**
+- [ ] Replace with `SHAPE_KAPPA_PROFILES` — dict mapping shape name to a function
+  `kappa_profile(n_edges) -> np.ndarray` that returns the normalised ideal κ sequence
+- [ ] Wall contact, absolute position, symmetry metrics: **delete entirely**
 
 ---
 
