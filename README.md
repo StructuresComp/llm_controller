@@ -59,29 +59,26 @@ A two-agent LangGraph framework for using large language models (and future visi
 
 ## Quick Start
 
-### 1. Environment Setup
-
 ```bash
 git clone <repo-url>
 cd agents_ESL
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
 ```
 
-### 2. Configure LLM Provider
-
-Create a `.env` file:
+Edit `.env` and add your API key:
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=your_anthropic_key_here
+# OPENAI_API_KEY=your_openai_key_here
 ```
 
-Verify `config.py` Section 1:
+If you use **Ollama**, skip the `.env` step and set these in `config.py` instead:
 ```python
-LLM_PROVIDER_FAST  = "anthropic"
-FAST_MODEL         = "claude-haiku-4-5"
-LLM_PROVIDER_SMART = "anthropic"
-SMART_MODEL        = "claude-haiku-4-5"  # swap to claude-sonnet-4-6 for harder tasks
+LLM_PROVIDER_FAST  = "ollama"
+FAST_MODEL         = "qwen2.5:14b"
+OLLAMA_BASE_URL    = "http://localhost:11434"
 ```
 
 ### 3. Test Physics Tool (Optional)
