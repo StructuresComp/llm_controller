@@ -1,15 +1,415 @@
-from langchain.agents import create_agent
-from src.agents.programmer_tool import run_beam_simulation
+# ---------------------------------------------------------------------------
+# src/agents/orchestrator_agent.py
+# ---------------------------------------------------------------------------
+# Orchestrator LangGraph sub-graph: planner_node → decision_node.
+#
+# planner_node  — writes a strategy to state["plan"] on the first call in
+#                 "plan" mode; no-op otherwise.
+# decision_node — always runs; appends state["plan"] to the prompt (empty
+#                 string in myopic mode = no effect); calls LLM with BC
+#                 schema to produce state["decision"].
+#
+# Section order (CLAUDE.md convention):
+#   1. Imports  2. Schemas  3. Prompts  4. Helpers  5. Nodes  6. Graph  7. Main  8. Entry
+# ---------------------------------------------------------------------------
 
-orchestrator_agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[run_beam_simulation],
-    system_prompt=(
-        "You are the Orchestrator agent.\n"
-        "Goal: perform mesh sensitivity analysis.\n"
-        "Find the smallest nv that produces a stable beam solution.\n"
-        "nv must be between 3 and 30.\n"
-        "Use run_beam_simulation to test values of nv.\n"
-        "Prefer smaller nv for computational efficiency."
+# ---------------------------------------------------------------------------
+# 1. IMPORTS
+# ---------------------------------------------------------------------------
+from langgraph.graph import END, StateGraph
+
+import config
+from src.llm.llm import call_llm, call_llm_with_tool
+from src.models.state_llm_control import ESLState
+
+
+# ---------------------------------------------------------------------------
+# 2. SCHEMAS
+# ---------------------------------------------------------------------------
+
+# BC decision schema — orchestrator is ALWAYS forced through this.
+# Never ask the LLM to write JSON freely; always use call_llm_with_tool.
+_BC_SCHEMA = {
+    "name": "set_boundary_condition",
+    "description": (
+        "Set the next boundary condition for the beam simulation. "
+        "Specify the target position and angle of the controlled end (node 0)."
     ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "x0": {
+                "type": "number",
+                "description": "Target x-position of node 0 (metres). Positive = right.",
+            },
+            "y0": {
+                "type": "number",
+                "description": "Target y-position of node 0 (metres). Negative = below origin.",
+            },
+            "theta": {
+                "type": "number",
+                "description": (
+                    "Target angle at node 0 (radians, counter-clockwise from -Y axis). "
+                    "0 = straight down, pi/2 = pointing right, -pi/2 = pointing left."
+                ),
+            },
+        },
+        "required": ["x0", "y0", "theta"],
+    },
+}
+
+# Convergence assessment schema
+_CONVERGED_SCHEMA = {
+    "name": "assess_convergence",
+    "description": "Assess whether the DLO has reached the target shape.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "converged": {
+                "type": "boolean",
+                "description": "True if the current shape matches the target well enough.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "One sentence explaining the assessment.",
+            },
+        },
+        "required": ["converged", "reason"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# 3. PROMPTS
+# ---------------------------------------------------------------------------
+
+_PLAN_SYSTEM = (
+    "You are an expert in controlling elastic beams. Your task is to press a deformable "
+    "beam against a wall and deform it into a target shape by manipulating the position "
+    "and angle at the controlled end. Think step-by-step about beam mechanics: bending "
+    "energy, gravity, contact with the wall, and which moves will curl the beam toward "
+    "the desired shape."
 )
+
+_PLAN_PROMPT = """\
+ROBOTIC ARM CONTROL SETUP:
+
+PHYSICAL SYSTEM:
+- Elastic beam (length L = {rod_length:.4f} m, stiffness EI = {EI:.6e})
+- One end: CLAMPED and held by the arm (node 0). YOU CONTROL THIS END.
+- Other end: FREE. Hangs under gravity. Can contact the wall.
+- Rigid wall at y = {wall_H:.4f} m — the beam cannot penetrate it.
+
+YOUR CONTROL INPUTS (arm degrees of freedom):
+- Position (x0, y0): where you hold node 0 (the clamped end)
+  * x0: horizontal position. x0 = 0 is centered. Positive x0 pushes right.
+  * y0: vertical position. y0 = 0 is origin. Negative y0 pushes down toward wall.
+- Angle theta: orientation of the clamped end (in radians, counter-clockwise from -Y axis)
+  * theta = 0:    beam points straight down          [tangent: 0, -1]
+  * theta = π/2:  beam points right                  [tangent: 1,  0]
+  * theta = -π/2: beam points left                   [tangent: -1, 0]
+
+TARGET: Deform the beam into a {target_shape} shape by pressing its free end against the wall and bending it.
+
+STRATEGY (3-6 steps):
+Write a step-by-step plan:
+1. First move: How will you position the arm to press the beam toward the wall?
+2. Rotation: What angle(s) will you apply to bend it in the right direction?
+3-6. Refinement: What sequence of arm moves will shape it into {target_shape}?
+
+Note: High EI means the beam resists bending — you need strong moves. Start gradually.
+"""
+
+_DECISION_SYSTEM = (
+    "You are controlling an elastic beam pressed against a wall. Your job is to issue "
+    "the next boundary condition move (x0, y0, theta) to steer the beam toward the target "
+    "shape. Think about beam mechanics: which moves will bend it in the right direction? "
+    "When does the beam contact the wall? Can you backtrack if you went wrong?"
+)
+
+_DECISION_PROMPT = """\
+ROBOTIC ARM CONTROL TASK:
+
+YOU CONTROL: Clamped end (node 0) position (x0, y0) and angle (theta, in radians).
+GOAL: Bend the free end of the beam against the wall at y = {wall_H:.4f} m to achieve a {target_shape} shape.
+BEAM PROPERTIES: Length L = {rod_length:.4f} m, Stiffness EI = {EI:.6e}.
+
+ANGLE CONVENTION (θ counter-clockwise from -Y axis):
+  θ =  0:    straight down  [0, -1]
+  θ =  π/2:  pointing right [1,  0]
+  θ = -π/2:  pointing left [-1,  0]
+
+{plan_section}\
+RECENT ARM MOVES ({k} most recent):
+{history_section}
+CURRENT BEAM STATE:
+{current_section}
+
+NEXT MOVE:
+Decide the arm's next position (x0, y0) and angle (theta) to progress toward {target_shape}.
+
+Ask yourself:
+1. Is the free end touching the wall? If not, move y0 more negative to push it against the wall.
+2. Is the beam bending in the right direction? If not, rotate theta to correct the curve.
+3. Should you backtrack? If progress stalled, reverse the last move.
+
+Strategy: Move gradually. The beam resists bending (high EI). Incremental changes accumulate.
+"""
+
+
+# ---------------------------------------------------------------------------
+# 4. HELPERS
+# ---------------------------------------------------------------------------
+
+import numpy as np
+
+
+def _compute_descriptors(observable_positions: list) -> dict:
+    """
+    Compute geometric descriptors from observable node positions.
+
+    Returns dict with:
+      tangent_angles: list of angles (radians) at each observable node
+      curvature_signs: list of +1, 0, -1 for each interior observable node
+      total_turning_angle: total signed rotation from first to last node
+    """
+    if len(observable_positions) < 2:
+        return {}
+
+    # Convert to numpy for easier computation
+    obs = np.array(observable_positions)
+
+    # Tangent angles at each node (CCW from -Y axis)
+    # Edge from node i to node i+1 has direction atan2(dx, -dy)
+    tangents = []
+    for i in range(len(obs) - 1):
+        dx = obs[i+1][0] - obs[i][0]
+        dy = obs[i+1][1] - obs[i][1]
+        angle = np.arctan2(dx, -dy)  # CCW from -Y axis
+        tangents.append(float(angle))
+
+    # Curvature signs: sign of change in tangent angle
+    curvature_signs = []
+    for i in range(len(tangents) - 1):
+        dangle = tangents[i+1] - tangents[i]
+        # Wrap to [-pi, pi]
+        while dangle > np.pi:
+            dangle -= 2 * np.pi
+        while dangle < -np.pi:
+            dangle += 2 * np.pi
+        sign = 1 if dangle > 1e-6 else (-1 if dangle < -1e-6 else 0)
+        curvature_signs.append(sign)
+
+    # Total turning angle
+    total_turning = tangents[-1] - tangents[0]
+    while total_turning > np.pi:
+        total_turning -= 2 * np.pi
+    while total_turning < -np.pi:
+        total_turning += 2 * np.pi
+
+    return {
+        "tangent_angles":    tangents,
+        "curvature_signs":   curvature_signs,
+        "total_turning":     float(total_turning),
+    }
+
+
+def _format_descriptors(descriptors: dict, indent: str = "  ") -> str:
+    """Format geometric descriptors as human-readable text."""
+    if not descriptors:
+        return ""
+    lines = [f"{indent}Tangent angles: {[f'{a:.3f}' for a in descriptors['tangent_angles']]}"]
+    lines.append(f"{indent}Curvature signs: {descriptors['curvature_signs']}")
+    lines.append(f"{indent}Total turning: {descriptors['total_turning']:.4f} rad")
+    return "\n".join(lines)
+
+
+def _format_plan_section(plan: str) -> str:
+    """Prepend the plan to the decision prompt if one exists."""
+    if not plan:
+        return ""
+    return f"Strategy:\n{plan}\n\n"
+
+
+def _format_history(bc_history: list, shape_history: list) -> str:
+    """Format rolling BC + shape history for the decision prompt."""
+    if not bc_history:
+        return "  (no history yet)\n"
+    lines = []
+    for i, (bc, shape) in enumerate(zip(bc_history, shape_history)):
+        x0, y0, theta = bc
+        lines.append(f"  Step {i+1}: node0 → ({x0:.4f}, {y0:.4f}) θ={theta:.4f} rad")
+        for j, (x, y) in enumerate(shape):
+            lines.append(f"           obs[{j}]: ({x:+.6f}, {y:+.6f})")
+        # Add geometric descriptors if requested
+        if config.OBSERVATION_LEVEL in ("geometric", "full"):
+            descriptors = _compute_descriptors(shape)
+            desc_text = _format_descriptors(descriptors, indent="           ")
+            lines.append(desc_text)
+    return "\n".join(lines) + "\n"
+
+
+def _format_current(shape_history: list, bc_current: list) -> str:
+    """Format the most recent observable configuration."""
+    if not shape_history:
+        return "  (initial straight-down configuration)\n"
+    x0, y0, theta = bc_current
+    lines = [f"  BC: ({x0:.4f}, {y0:.4f}) θ={theta:.4f} rad"]
+    current_shape = shape_history[-1]
+    for j, (x, y) in enumerate(current_shape):
+        lines.append(f"  obs[{j}]: ({x:+.6f}, {y:+.6f})")
+    # Add geometric descriptors if requested
+    if config.OBSERVATION_LEVEL in ("geometric", "full"):
+        descriptors = _compute_descriptors(current_shape)
+        desc_text = _format_descriptors(descriptors, indent="  ")
+        lines.append(desc_text)
+    return "\n".join(lines) + "\n"
+
+
+def _detect_stagnation(bc_history: list, tol: float = 1e-4) -> bool:
+    """Return True if the last few BCs are nearly identical (no progress)."""
+    if len(bc_history) < 3:
+        return False
+    recent = bc_history[-3:]
+    for i in range(1, len(recent)):
+        diff = sum(abs(a - b) for a, b in zip(recent[i], recent[i-1]))
+        if diff > tol:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 5. NODES
+# ---------------------------------------------------------------------------
+
+def planner_node(state: ESLState) -> dict:
+    """Generate a high-level plan on the first call in plan mode; no-op otherwise."""
+    if config.ORCHESTRATOR_MODE != "plan" or state["plan"]:
+        return {}
+
+    ps = state["physical_system"]
+    prompt = _PLAN_PROMPT.format(
+        wall_H       = ps["wall_H"],
+        rod_length   = ps["rod_length"],
+        EI           = ps["EI"],
+        target_shape = state["target_shape"] or "unspecified",
+    )
+    plan = call_llm(prompt=prompt, model="smart", system=_PLAN_SYSTEM,
+                    max_tokens=config.MAX_TOKENS_SMART)
+    return {"plan": plan}
+
+
+def decision_node(state: ESLState) -> dict:
+    """Issue the next BC decision and assess convergence."""
+    ps = state["physical_system"]
+
+    prompt = _DECISION_PROMPT.format(
+        target_shape    = state["target_shape"] or "unspecified",
+        wall_H          = ps["wall_H"],
+        rod_length      = ps["rod_length"],
+        EI              = ps["EI"],
+        k               = config.K_HISTORY,
+        plan_section    = _format_plan_section(state["plan"]),
+        history_section = _format_history(state["bc_history"], state["shape_history"]),
+        current_section = _format_current(state["shape_history"], state["bc_current"]),
+    )
+
+    # BC decision — schema-enforced, never free JSON
+    decision = call_llm_with_tool(
+        prompt      = prompt,
+        tool_schema = _BC_SCHEMA,
+        tool_name   = "set_boundary_condition",
+        model       = "smart",
+        system      = _DECISION_SYSTEM,
+        max_tokens  = config.MAX_TOKENS_FAST,
+    )
+
+    # Print decision in real-time
+    iteration_num = len(state["iteration_log"]) + 1
+    print(f"\n[Iteration {iteration_num}] Orchestrator decision:")
+    print(f"  x0 = {decision['x0']:+.6f} m  |  y0 = {decision['y0']:+.6f} m  |  θ = {decision['theta']:+.6f} rad")
+
+    # Convergence assessment
+    convergence = call_llm_with_tool(
+        prompt = (
+            f"TARGET SHAPE: {state['target_shape']}\n"
+            f"WALL: at y = {ps['wall_H']:.4f} m\n"
+            f"\n"
+            f"CURRENT BEAM STATE (observable nodes shown):\n"
+            f"{_format_current(state['shape_history'], state['bc_current'])}\n"
+            f"\n"
+            f"Has the beam been deformed into a {state['target_shape']} shape? "
+            f"Judge by: curvature direction, symmetry, contact with the wall, overall shape match. "
+            f"Be strict: the shape must clearly match the target."
+        ),
+        tool_schema = _CONVERGED_SCHEMA,
+        tool_name   = "assess_convergence",
+        model       = "fast",
+        system      = "You are a structural mechanics expert. Judge whether the current beam deformation matches the target shape.",
+        max_tokens  = config.MAX_TOKENS_FAST,
+    )
+
+    # Print convergence assessment in real-time
+    if convergence["converged"]:
+        print(f"  ✓ CONVERGED: {convergence['reason']}")
+    else:
+        print(f"  → Not converged: {convergence['reason']}")
+
+    updates: dict = {
+        "decision":  decision,
+        "converged": convergence["converged"],
+    }
+
+    # Replan if stagnating and ALLOW_REPLAN is set
+    if config.ALLOW_REPLAN and _detect_stagnation(state["bc_history"]):
+        updates["plan"] = ""   # clears plan → planner_node will regenerate next call
+
+    return updates
+
+
+# ---------------------------------------------------------------------------
+# 6. GRAPH BUILDER
+# ---------------------------------------------------------------------------
+
+def build_orchestrator_graph():
+    """Compile the orchestrator sub-graph: planner_node → decision_node."""
+    graph = StateGraph(ESLState)
+
+    graph.add_node("planner",  planner_node)
+    graph.add_node("decision", decision_node)
+
+    graph.set_entry_point("planner")
+    graph.add_edge("planner", "decision")
+    graph.add_edge("decision", END)
+
+    return graph.compile()
+
+
+# ---------------------------------------------------------------------------
+# 7. MAIN
+# ---------------------------------------------------------------------------
+
+def main():
+    """Standalone test: run one orchestrator cycle from an empty state."""
+    import config
+    from src.models.physical_system import make_physical_system
+    from src.models.state_llm_control import initial_esl_state
+
+    ps    = make_physical_system(config)
+    state = initial_esl_state(ps, target_shape="C", bc_target=[0.0, -0.05, 0.5])
+
+    graph   = build_orchestrator_graph()
+    updates = graph.invoke(state)
+
+    print("Plan:")
+    print(updates.get("plan") or "(none — myopic mode)")
+    print("\nDecision:", updates.get("decision"))
+    print("Converged:", updates.get("converged"))
+
+
+# ---------------------------------------------------------------------------
+# 8. ENTRY POINT
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    main()

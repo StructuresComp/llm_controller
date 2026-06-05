@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Optional
 
 from langchain.tools import tool
 
@@ -336,7 +335,7 @@ def objfun(q_old, u_old, dt, tol, maximum_iter,
            EI, EA, # elastic stiffness
            W, C, # external force
            deltaL,
-           free_index, fixed_index):
+           free_index):
 
   """
   Objective Function or Integrator
@@ -383,228 +382,280 @@ def objfun(q_old, u_old, dt, tol, maximum_iter,
     # Update the iteration number
     iter_count += 1
     if iter_count > maximum_iter:
-      flag = -1 # Return with an error signal
+      flag = -1
       print("Maximum number of iterations reached.")
-
-      n_free = len(free_index)
-      n_fixed = len(fixed_index)
-      S = np.zeros((n_free, n_fixed))
-      return q_new, flag
+      return q_new, f, flag
 
     # u_new = (q_new - q_old) / dt # Velocity
-    
-  # sensitivity operator after convergence
-  J_ff = J_elastic[np.ix_(free_index, free_index)]
-  J_fb = J_elastic[np.ix_(free_index, fixed_index)]
-  Sensitivity = - np.linalg.solve(J_ff, J_fb)
 
-  return q_new, Sensitivity, flag
+  reactionForce = f
+  return q_new, reactionForce, flag
 
-def discreteBeam(
-  nv: int = 11,
-  RodLength: float = 0.1,
-  dt: float = 0.01,
-  totalTime: float = 5,
-  plotImage: int = 0,
-  saveImage: int = 0,
-  plotStep: int = 50) -> tuple[np.ndarray, np.ndarray]:
-  
+def getControlNodes(
+  ctime: float,
+  control_position: tuple,
+  control_angle: float,
+  initial_controlled_nodes: np.ndarray,
+  totalTime: float,
+  deltaL: float) -> np.ndarray:
   """
-  Discrete beam simulator and sensitivity operator.
+  Return positions of the two controlled (fixed) nodes at the current time.
 
-  This tool runs a physics simulation of a planar discrete elastic beam
-  (using stretching and bending energies) and returns the final
-  equilibrium configuration together with the equilibrium sensitivity
-  operator used in Equilibrium Sensitivity Learning (ESL).
+  Linearly interpolates position and angle from the initial BC to the target BC
+  over totalTime, then places node 1 from node 0 using the inextensible
+  beam assumption.
 
-  The beam is represented as a chain of vertices connected by elastic
-  edges. Two degrees of freedom (x,y) exist per vertex. The first two
-  nodes are fixed as boundary conditions, and the remaining nodes evolve
-  under inertia, elastic forces, gravity, and viscous damping.
-
-  The simulator advances the system in time using an implicit Newton
-  solver. At the final time step it also computes the
-  equilibrium sensitivity operator
-
-      S = ∂q_f / ∂q_b = -J_ff^{-1} J_fb
-
-  where
-
-      q_f : free DOFs
-      q_b : boundary (fixed) DOFs
-      J_ff : Jacobian block for free DOFs
-      J_fb : coupling block between free and boundary DOFs
-
-  This operator describes how the equilibrium configuration of the beam
-  changes with respect to perturbations of the boundary DOFs. It is the
-  primary quantity used by the ESL learning framework.
+  Angle convention: theta is measured counter-clockwise from the -Y axis.
+    theta =  0      -> beam points straight down  (tangent = [ 0, -1])
+    theta =  pi/2   -> beam points right           (tangent = [ 1,  0])
+    theta = -pi/2   -> beam points left            (tangent = [-1,  0])
+    theta =  pi     -> beam points straight up     (tangent = [ 0,  1])
+  Tangent vector: (sin(theta), -cos(theta))
+  Node 1 = Node 0 + deltaL * (sin(theta), -cos(theta))
 
   Parameters
   ----------
-
-  nv : int
-      Number of beam vertices. Each vertex has (x,y) DOFs.
-      Total DOFs = 2 * nv.
-
-  RodLength : float
-      Total physical length of the beam.
-
-  dt : float
-      Time step for implicit integration.
-
+  ctime : float
+      Current simulation time.
+  control_position : tuple[float, float]
+      Target position of node 0: (x0_target, y0_target).
+  control_angle : float
+      Target angle at node 0 (radians, from -Y axis, clockwise positive).
+  initial_controlled_nodes : np.ndarray
+      [x0, y0, x1, y1] of nodes 0 and 1 at t = 0.
   totalTime : float
-      Total duration of the simulation.
-
-  plotImage : int
-      If 1, intermediate beam configurations and diagnostic plots are shown.
-
-  saveImage : int
-      If 1, diagnostic plots are saved to disk.
-
-  plotStep : int
-      Plot frequency in number of time steps.
+      Total simulation duration; alpha = 1 at this time.
+  deltaL : float
+      Edge length (m); used to place node 1 from node 0 + tangent.
 
   Returns
   -------
-
-  q_new : np.ndarray
-      Final configuration vector of size (2*nv).
-      Layout: [x1, y1, x2, y2, ..., x_nv, y_nv].
-
-  Sensitivity : np.ndarray
-      Equilibrium sensitivity matrix S with shape:
-
-          (#free DOFs) x (#boundary DOFs)
-
-      In this model the first two nodes are fixed, giving
-      4 boundary DOFs and (2*nv - 4) free DOFs.
-
-      S[i,j] measures how free DOF i responds to perturbation of
-      boundary DOF j.
-
-  Notes
-  -----
-
-  - If the Newton solver fails to converge at a time step,
-    the sensitivity matrix returned is a zero matrix.
-  - This tool is designed to act as a ground-truth physics generator
-    for learning reduced-order models or neural energy models.
+  np.ndarray
+      [x0, y0, x1, y1] at the current time.
   """
-  
-  ndof = 2 * nv # Number of DOFs (x and y for each node)
-  midNode = nv//2 + 1 # Middle node index
+  x0_init, y0_init = initial_controlled_nodes[0], initial_controlled_nodes[1]
+  x1_init, y1_init = initial_controlled_nodes[2], initial_controlled_nodes[3]
 
-  # Discrete length / reference length
-  deltaL = RodLength / (nv - 1)
+  # Recover initial angle from the initial node positions
+  theta_init = np.arctan2(x1_init - x0_init, -(y1_init - y0_init))
 
-  # Density in kg/m^3
-  rho = 10000
+  x0_target, y0_target = control_position
 
-  # Cross sectional radius
-  r0 = 1e-2 # meter
+  # Linear interpolation fraction (clamped to avoid overshoot)
+  alpha = min(ctime / totalTime, 1.0)
 
-  # Young's modulus
-  Y = 1e6
+  x0    = x0_init + alpha * (x0_target - x0_init)
+  y0    = y0_init + alpha * (y0_target - y0_init)
+  theta = theta_init + alpha * (control_angle - theta_init)
 
-  # Viscosity
-  visc = 1000.0 # Pa-s
+  # Node 1 from node 0 + tangent (inextensible beam)
+  x1 = x0 + deltaL * np.sin(theta)
+  y1 = y0 - deltaL * np.cos(theta)
 
-  # Maximum number of iterations
+  return np.array([x0, y0, x1, y1])
+
+
+def discreteBeam(
+  physical_system: dict,
+  q0: list = None,
+  u0: list = None,
+  control_position: tuple = (0.0, 0.0),
+  control_angle: float = 0.0,
+  t_start: float = 0.0,
+  dt: float = 0.01,
+  totalTime: float = None,
+  plotImage: int = 0,
+  plotStep: int = 5) -> dict:
+
+  """
+  Discrete elastic beam simulator.
+
+  Simulates a planar discrete elastic beam using stretching and bending
+  energies. Physical parameters are read from physical_system; the caller
+  supplies q0 and u0 so runs can be chained without re-initialising.
+
+  Parameters
+  ----------
+  physical_system : PhysicalSystem dict
+      Pre-computed physical and derived quantities (from make_physical_system).
+
+  q0 : list[float], optional
+      Initial DOF vector, length 2*nv. Defaults to straight-vertical
+      configuration. Pass the previous call's q_new to chain runs.
+
+  u0 : list[float], optional
+      Initial velocity vector, length 2*nv. Defaults to zero.
+      Pass the previous call's u_new to chain runs.
+
+  control_position : tuple[float, float]
+      Target position of node 0: (x0_target, y0_target).
+
+  control_angle : float
+      Target angle at node 0 (radians, counter-clockwise from -Y axis).
+      theta = 0 -> straight down;  theta = pi/2 -> pointing right.
+
+  t_start : float
+      Cumulative simulation time at the start of this call (seconds).
+      Pass the previous call's ctime to keep displayed time continuous.
+      BC interpolation uses relative time internally so physics is unaffected.
+
+  dt : float
+      Time step for implicit integration (seconds).
+
+  totalTime : float, optional
+      Duration of this simulation run (seconds). If None (default), computed
+      automatically as max(delta_pos / BOUNDARY_VELOCITY,
+      delta_angle / BOUNDARY_ANGLE_VELOCITY), ensuring the BC moves at the
+      prescribed quasi-static rate. Override for testing.
+
+  plotImage : int
+      If 1, show beam configuration at every plotStep time steps.
+
+  plotStep : int
+      Plot every this many time steps (only used when plotImage = 1).
+
+  Returns
+  -------
+  dict
+      status  : "success" or "failed_convergence"
+      message : human-readable outcome string
+      q_new   : list[float] — final DOF vector, length 2*nv
+      u_new   : list[float] — final velocity vector, length 2*nv
+      ctime   : float       — cumulative simulation time reached
+  """
+
+  # Unpack physical system
+  nv         = physical_system["nv"]
+  EI         = physical_system["EI"]
+  EA         = physical_system["EA"]
+  deltaL     = physical_system["deltaL"]
+  rod_length = physical_system["rod_length"]
+  wall_H     = physical_system["wall_H"]
+  friction   = physical_system["friction"]
+
+  m    = np.array(physical_system["m"])
+  mMat = np.diag(m)
+  W    = np.array(physical_system["W"])
+  C    = np.diag(np.array(physical_system["C_diag"]))
+
+  ndof         = 2 * nv
+  tol          = EI / rod_length**2 * 1e-3
   maximum_iter = 50
 
-  # Utility quantites
-  ne = nv - 1 # number of edges
-  EI = Y * np.pi * r0**4 / 4
-  EA = Y * np.pi * r0**2
+  # Initialise q0/u0 on first call (straight vertical, zero velocity)
+  from src.models.physical_system import initial_q0, initial_u0
+  if q0 is None:
+    q0 = np.array(initial_q0(physical_system), dtype=float)
+  else:
+    q0 = np.array(q0, dtype=float)
 
-  # Tolerance
-  tol = EI / RodLength ** 2 * 1e-3
+  if u0 is None:
+    u0 = np.array(initial_u0(physical_system), dtype=float)
+  else:
+    u0 = np.array(u0, dtype=float)
 
-  # Geometry
-  nodes = np.zeros((nv, 2))
-  for c in range(nv):
-    nodes[c, 0] = c * deltaL # x-coordinate
-    nodes[c, 1] = 0.0 # y-coordinate
+  # Compute totalTime from boundary velocities if not explicitly provided
+  if totalTime is None:
+    bv  = physical_system["boundary_velocity"]
+    bav = physical_system["boundary_angle_velocity"]
 
-  # Mass vector and matrix
-  totalM = rho * np.pi * r0**2 * RodLength
-  m = np.zeros( 2 * nv )
-  for k in range(0, nv):
-    if k == 0 or k == nv-1:
-      dm = totalM / (nv - 1) / 2 # mass of the first and last node
-    else:
-      dm = totalM / (nv - 1) # mass of the middle nodes
-    m[2*k] = dm # mass of k-th node along x
-    m[2*k + 1] = dm # mass of k-th node along y
-  mMat = np.diag(m)
+    x0_curr, y0_curr = q0[0], q0[1]
+    x1_curr, y1_curr = q0[2], q0[3]
+    theta_curr = np.arctan2(x1_curr - x0_curr, -(y1_curr - y0_curr))
 
-  # Gravity (external force)
-  W = np.zeros( 2 * nv)
-  g = np.array([0, -9.8]) # m/s^2
-  for k in range(0, nv):
-    W[2*k] = m[2*k] * g[0] # Weight along x
-    W[2*k+1] = m[2*k+1] * g[1] # Weight along y
-  # Gradient of W = 0
+    x0_tgt, y0_tgt = control_position
+    delta_pos   = np.sqrt((x0_tgt - x0_curr)**2 + (y0_tgt - y0_curr)**2)
+    delta_angle = abs(control_angle - theta_curr)
 
-  # Viscous damping (external force)
-  C = np.zeros((2 * nv, 2 * nv))
-  for k in range(0, nv):
-    C[2*k, 2*k] = visc * deltaL # Damping along x for k-th node
-    C[2*k+1, 2*k+1] = visc * deltaL # Damping along y for k-th node
+    t_pos   = delta_pos   / bv
+    t_angle = delta_angle / bav
 
-  # Initial conditions
-  q0 = np.zeros(2 * nv)
-  for c in range(nv):
-    q0[2*c] = nodes[c, 0] # x coordinate
-    q0[2*c+1] = nodes[c, 1] # y coordinate
+    totalTime = max(t_pos, t_angle, dt)   # floor at one time step
 
-  u0 = np.zeros(2 * nv) # old velocity
+  all_DOFs    = np.arange(ndof)
+  fixed_index = np.array([0, 1, 2, 3])           # controlled nodes 0 and 1 are always fixed
+  free_index  = np.setdiff1d(all_DOFs, fixed_index)
 
-  # Boundary Conditions:
-  # In this example, the boundary conditions do not change with time and, therefore, we can compute the free_index (corresponding to free DOFs) and fixed_index (corresponding to fixed DOFs) at $t=0$.
+  initial_controlled_nodes = q0[0:4].copy()
 
-  all_DOFs = np.arange(ndof) # Set of all DOFs
-  fixed_index = np.array([0, 1, 2, 3]) # Fixed DOFs
+  # Wall contact state: one flag per node; nodes 0 and 1 are never set by wall logic
+  is_wall_contact = np.zeros(nv, dtype=bool)
 
-  # Free index
-  free_index = np.setdiff1d(all_DOFs, fixed_index) # All the DOFs are free except the fixed ones
-
-  # Time stepping loop
-
-  # Number of steps
-  Nsteps = round( totalTime / dt )
-
-  ctime = 0 # Current time
-
-  # Store the y-coordinate of the middle node, its velocity, and the angle
-  all_pos = np.zeros(Nsteps)
-  all_vel = np.zeros(Nsteps)
-  mid_angle = np.zeros(Nsteps)
-
-  all_pos[0] = 0
-  all_vel[0] = 0
-  mid_angle[0] = 0
+  Nsteps = round(totalTime / dt)
+  ctime  = t_start          # cumulative time (for display / chaining)
+  q_new  = q0.copy()        # safe default if Nsteps < 2
 
   # Loop over the time steps
-  for timeStep in range(1,Nsteps):
+  for timeStep in range(1, Nsteps + 1):
 
-    q_new, Sensitivity, error = objfun(q0, u0, dt, tol, maximum_iter, m, mMat, EI, EA, W, C,
-                          deltaL, free_index, fixed_index)
-    if error < 0:
-      print('Could not converge.')
-      break
-    u_new = (q_new - q0) / dt # New velocity
-    ctime += dt # Update current time
+    # Relative time within this run (0 → totalTime) drives BC interpolation
+    rel_time = ctime - t_start
 
-    # Save information about the middle node
-    all_pos[timeStep] = q_new[2*midNode-1] # y coordinate of middle node
-    all_vel[timeStep] = u_new[2*midNode-1] # y velocity of middle node
-    vec1 = np.array( [ q_new[2*midNode-2], q_new[2*midNode-1], 0 ] ) - np.array( [ q_new[2*midNode-4], q_new[2*midNode-3], 0 ] ) # Second node - First node
-    vec2 = np.array( [ q_new[2*midNode], q_new[2*midNode+1], 0 ] ) - np.array( [ q_new[2*midNode-2], q_new[2*midNode-1], 0 ] ) # Third node - Second node
-    mid_angle[timeStep] =  np.degrees( np.arctan2(np.linalg.norm( np.cross(vec1, vec2)), np.dot(vec1, vec2)) )
+    # Impose moving boundary condition on nodes 0 and 1
+    BC_DOFs = getControlNodes(rel_time, control_position, control_angle,
+                              initial_controlled_nodes, totalTime, deltaL)
+    q0[0:4] = BC_DOFs
 
-    q0 = q_new.copy() # New position becomes old position
-    u0 = u_new.copy() # New velocity becomes old velocity
+    # ------------------------------------------------------------------
+    # Predictor step — solve with current fixed_index
+    # ------------------------------------------------------------------
+    q_pred, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
+                                         m, mMat, EI, EA, W, C,
+                                         deltaL, free_index)
+    if flag < 0:
+      return {
+        "status":  "failed_convergence",
+        "message": f"Predictor did not converge at step {timeStep} (t = {ctime:.4f} s).",
+        "q_new":   q0.tolist(),
+        "u_new":   u0.tolist(),
+        "ctime":   ctime,
+      }
+
+    # ------------------------------------------------------------------
+    # Update wall contact flags (checks 1 and 2 independently on predictor)
+    # ------------------------------------------------------------------
+    for i in range(2, nv):  # nodes 0 and 1 are never subject to wall logic
+      # Check 1: free node penetrates wall -> add contact
+      if not is_wall_contact[i] and q_pred[2*i+1] <= wall_H:
+        is_wall_contact[i] = True
+      # Check 2: contact node has wrong-sign reaction -> release
+      if is_wall_contact[i] and reactionForce[2*i+1] <= 0:
+        is_wall_contact[i] = False
+
+    # ------------------------------------------------------------------
+    # Rebuild fixed_index / free_index and enforce wall constraints on q0
+    # ------------------------------------------------------------------
+    fixed_index = [0, 1, 2, 3]  # nodes 0 and 1 always fixed
+    for i in range(2, nv):
+      if is_wall_contact[i]:
+        q0[2*i+1] = wall_H          # y always pinned at wall surface
+        fixed_index.append(2*i+1)
+        if friction:
+          q0[2*i] = q_pred[2*i]     # x frozen only with friction
+          fixed_index.append(2*i)
+    fixed_index = np.array(fixed_index)
+    free_index  = np.setdiff1d(all_DOFs, fixed_index)
+
+    # ------------------------------------------------------------------
+    # Corrector step — solve with updated fixed_index
+    # ------------------------------------------------------------------
+    q_new, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
+                                        m, mMat, EI, EA, W, C,
+                                        deltaL, free_index)
+    if flag < 0:
+      return {
+        "status":  "failed_convergence",
+        "message": f"Corrector did not converge at step {timeStep} (t = {ctime:.4f} s).",
+        "q_new":   q0.tolist(),
+        "u_new":   u0.tolist(),
+        "ctime":   ctime,
+      }
+
+    u_new = (q_new - q0) / dt
+    ctime += dt
+
+    q0 = q_new.copy()
+    u0 = u_new.copy()
 
     # Plot
     if plotImage and timeStep % plotStep == 0:
@@ -621,42 +672,31 @@ def discreteBeam(
       plt.show(block=False)
       plt.pause(0.01)
 
-  if plotImage:
-    # Plot the middle node information as a function of time
-    t_arr = np.linspace(0, totalTime, Nsteps)
+  return {
+    "status":  "success",
+    "message": f"Simulation completed {Nsteps - 1} steps to t = {ctime:.4f} s.",
+    "q_new":   q_new.tolist(),
+    "u_new":   u0.tolist(),
+    "ctime":   ctime,
+  }
 
-    plt.figure(2)
-    plt.plot(t_arr, all_pos, 'ko-')
-    plt.xlabel('Time (s)')
-    plt.ylabel('Middle Node Position (m)')
-    plt.title('Middle Node Position vs. Time')
-    if saveImage:
-      plt.savefig('middle_node_position.png')
-
-    plt.figure(3)
-    plt.plot(t_arr, all_vel, 'ko-')
-    plt.xlabel('Time (s)')
-    plt.ylabel('Middle Node Velocity (m/s)')
-    plt.title('Middle Node Velocity vs. Time')
-    plt.show(block=False)
-    if saveImage:
-      plt.savefig('middle_node_velocity.png')
-
-    plt.figure(4)
-    plt.plot(t_arr, mid_angle, 'ko-')
-    plt.xlabel('Time (s)')
-    plt.ylabel('Turning angle (degrees)')
-    plt.title('Turning angle vs. Time')
-    plt.show(block=False)
-    if saveImage:
-      plt.savefig('turning_angle.png')
-
-    plt.show()
-
-  return q_new, Sensitivity
-
-# Register the discreteBeam function as a LangChain tool for integration with agent workflows.
-beam_tool = tool(discreteBeam)
-
+#
+# Run it from the project root: python -m src.tools.Discrete_Elastic_Beams
+#
 if __name__ == "__main__":
-  discreteBeam()
+  import config
+  from src.models.physical_system import make_physical_system
+
+  ps     = make_physical_system(config)
+  result = discreteBeam(
+    physical_system  = ps,
+    control_position = (0.0, -0.07),
+    control_angle    = 0.0,
+    plotImage        = config.PLOT_IMAGE,
+  )
+
+  print(f"Status:  {result['status']}")
+  print(f"Message: {result['message']}")
+  if result["status"] == "success":
+    q = result["q_new"]
+    print(f"Tip:  x = {q[-2]:.6f} m,  y = {q[-1]:.6f} m")

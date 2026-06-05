@@ -1,0 +1,85 @@
+# ---------------------------------------------------------------------------
+# src/models/state_llm_control.py
+# ---------------------------------------------------------------------------
+# Shared working state for the ESL LangGraph pipeline.
+#
+# Pipeline (current):  orchestrator → programmer
+# Pipeline (future):   orchestrator → programmer → (converged?) → loop back
+# ---------------------------------------------------------------------------
+
+from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph.message import add_messages
+
+
+class ESLState(TypedDict):
+
+    # ============ MESSAGES
+    messages: Annotated[list, add_messages]
+
+    # ============ PHYSICAL SYSTEM
+    # Pre-computed physical and derived quantities. Built once at startup
+    # from config.py via make_physical_system(). Never modified during a run.
+    physical_system: dict
+
+    # ============ SIMULATION CONTINUITY
+    # Position, velocity, and time at the end of the last tool call.
+    # Passed directly to the next discreteBeam call so runs chain seamlessly.
+    q0_current:    list   # DOF vector, length 2*nv
+    u0_current:    list   # velocity vector, length 2*nv
+    ctime_current: float  # cumulative simulation time (seconds); used as t_start
+
+    # ============ BOUNDARY CONDITION
+    # Current active BC. Layout: [x0, y0, theta]  (stored as list for JSON serialisability)
+    bc_current: list   # BC at the end of the last run
+
+    # ============ HISTORY (rolling window, length = K_HISTORY)
+    bc_history:    list   # list of [x0, y0, theta] — last K BCs issued
+    shape_history: list   # list of partial configs (N_PARTIAL nodes each)
+
+    # ============ ALL CONFIGURATIONS
+    # Full DOF vector from every tool call, keyed by call index (0-based).
+    # Capped at MAX_CONFIGS; downsampled when exceeded (index 0 always kept).
+    all_configurations: dict
+
+    # ============ TARGET & CONVERGENCE
+    target_shape: str    # "C", "U", "S", etc. — set from CLI --target
+    converged:    bool
+
+    # ============ ORCHESTRATOR
+    # decision is a validated dict produced by call_llm_with_tool — never a raw string.
+    # Schema: {"x0": float, "y0": float, "theta": float}
+    decision: dict  # BC decision from orchestrator (structured, schema-enforced)
+    plan:     str   # high-level strategy (plan mode only; "" in myopic mode)
+    result:   str   # programmer's natural-language summary of last run
+
+    # ============ ITERATION LOG
+    iteration_log: list  # list of {iteration, decision, tip_pos} — one per completed iteration
+
+    # ============ GLOBAL
+    error: str | None
+
+
+def initial_esl_state(
+    physical_system: dict,
+    target_shape: str = "",
+) -> ESLState:
+    from src.models.physical_system import initial_q0, initial_u0
+    return {
+        "messages":          [],
+        "physical_system":   physical_system,
+        "q0_current":        initial_q0(physical_system),
+        "u0_current":        initial_u0(physical_system),
+        "ctime_current":     0.0,
+        "bc_current":        [0.0, 0.0, 0.0],
+        "bc_history":        [],
+        "shape_history":     [],
+        "all_configurations": {},
+        "target_shape":      target_shape,
+        "converged":         False,
+        "decision":          {},
+        "plan":              "",
+        "result":            "",
+        "iteration_log":     [],
+        "error":             None,
+    }
