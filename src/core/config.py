@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # config.py
 # ---------------------------------------------------------------------------
-# Central configuration for the ESL agent framework.
+# Central configuration for the LLM controller framework.
 # All tuneable settings live here. No other file should hardcode these values.
 #
 # Sections (in order):
@@ -15,32 +15,12 @@
 # 1. LLM
 # ===========================================================================
 # Provider choices: "anthropic", "openai", "ollama", "fake"
-# Two tiers:
-#   fast  — cheap and quick (haiku-class). Used for parameter extraction,
-#            summarization, and any call where latency matters.
-#   smart — more capable (sonnet-class). Reserved for complex reasoning
-#            (e.g., future orchestrator planning over physical state).
+# Provider can also be inferred from the model name (claude-* → anthropic,
+# gpt-/o1-/o3-/o4-* → openai, gemini-* → gemini).
 
-qwen = False
-if qwen:
-    LLM_PROVIDER_FAST  = "ollama"
-    FAST_MODEL         = "qwen2.5:14b"
-    LLM_PROVIDER_SMART = "ollama"
-    SMART_MODEL        = "qwen2.5:14b"
-else:
-    LLM_PROVIDER_FAST  = "anthropic"
-    FAST_MODEL         = "claude-haiku-4-5"
-    LLM_PROVIDER_SMART = "anthropic"
-    SMART_MODEL        = "claude-haiku-4-5"  # swap to "claude-sonnet-4-6" for smarter reasoning
-
-# Token caps — hard upper bound on output tokens per LLM call.
-# Prevents runaway generation. Fast calls produce short structured output;
-# smart calls (planning) need more room for reasoning.
-MAX_TOKENS_FAST  = 512    # BC decisions, convergence checks — structured, short
-MAX_TOKENS_SMART = 2048   # planning — needs reasoning room
-
-# Logging
-LOG_LLM_CALLS = False   # if True, write all LLM prompts + responses to logs/llm_calls.jsonl
+LLM_PROVIDER = "anthropic"
+MODEL        = "claude-haiku-4-5"
+MAX_TOKENS   = 2048   # hard upper bound on output tokens per LLM call
 
 # Ollama-specific settings (ignored when provider is not "ollama")
 OLLAMA_BASE_URL    = "https://assure-roots-hostels-excessive.trycloudflare.com"

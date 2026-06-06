@@ -5,7 +5,7 @@
 #
 # make_physical_system(config) reads raw parameters from config.py,
 # computes all derived quantities once, and returns a plain dict that
-# can be stored in ESLState and passed directly to physics tools.
+# can be stored in ControllerState and passed directly to physics tools.
 #
 # Tools never import config — they read from PhysicalSystem only.
 # ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ def make_physical_system(cfg=None) -> PhysicalSystem:
     PhysicalSystem
     """
     if cfg is None:
-        import config as cfg
+        import src.core.config as cfg
 
     nv         = cfg.NV
     rho        = cfg.RHO

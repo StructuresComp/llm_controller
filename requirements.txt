@@ -4,14 +4,10 @@
 numpy
 matplotlib
 langgraph
-anthropic
 python-dotenv
 typing_extensions
 
 # ---------------------------------------------------------------------------
-# Optional LLM providers (uncomment what you use in config.py)
+# LLM
 # ---------------------------------------------------------------------------
-# langchain-anthropic   # needed only for get_langchain_llm() with Anthropic
-# langchain-openai      # needed only for get_langchain_llm() with OpenAI
-# langchain-ollama      # needed only for get_langchain_llm() with Ollama
-# openai                # needed only for the raw OpenAI provider
+git+https://github.com/agentic-writing/llm_wrapper.git@v0.1.0

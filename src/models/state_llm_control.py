@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # src/models/state_llm_control.py
 # ---------------------------------------------------------------------------
-# Shared working state for the ESL LangGraph pipeline.
+# Shared working state for the LLM controller pipeline.
 #
 # Pipeline (current):  orchestrator → programmer
 # Pipeline (future):   orchestrator → programmer → (converged?) → loop back
@@ -12,7 +12,7 @@ from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 
 
-class ESLState(TypedDict):
+class ControllerState(TypedDict):
 
     # ============ MESSAGES
     messages: Annotated[list, add_messages]
@@ -56,14 +56,20 @@ class ESLState(TypedDict):
     # ============ ITERATION LOG
     iteration_log: list  # list of {iteration, decision, tip_pos} — one per completed iteration
 
+    # ============ EVALUATOR
+    # Geometric shape error computed by evaluator_node after each programmer run.
+    # Keys: error_percent, confidence_percent, rms_normalized, fitted_params, diagnostics.
+    # Empty dict before first evaluation or when target_shape is unset.
+    eval_result: dict
+
     # ============ GLOBAL
     error: str | None
 
 
-def initial_esl_state(
+def initial_controller_state(
     physical_system: dict,
     target_shape: str = "",
-) -> ESLState:
+) -> ControllerState:
     from src.models.physical_system import initial_q0, initial_u0
     return {
         "messages":          [],
@@ -81,5 +87,6 @@ def initial_esl_state(
         "plan":              "",
         "result":            "",
         "iteration_log":     [],
+        "eval_result":       {},
         "error":             None,
     }

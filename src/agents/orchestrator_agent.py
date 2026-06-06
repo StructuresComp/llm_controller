@@ -18,9 +18,9 @@
 # ---------------------------------------------------------------------------
 from langgraph.graph import END, StateGraph
 
-import config
+from src.core import config
 from src.llm.llm import call_llm, call_llm_with_tool
-from src.models.state_llm_control import ESLState
+from src.models.state_llm_control import ControllerState
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ RECENT ARM MOVES ({k} most recent):
 {history_section}
 CURRENT BEAM STATE:
 {current_section}
-
+{eval_section}\
 NEXT MOVE:
 Decide the arm's next position (x0, y0) and angle (theta) to progress toward {target_shape}.
 
@@ -266,6 +266,19 @@ def _format_current(shape_history: list, bc_current: list) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _format_eval_section(eval_result: dict) -> str:
+    """Format the geometric evaluator result for the decision prompt."""
+    if not eval_result:
+        return ""
+    pct = eval_result.get("error_percent", 100.0)
+    diag = eval_result.get("diagnostics", "")
+    return (
+        f"GEOMETRIC SHAPE ERROR (deterministic ground truth):\n"
+        f"  {pct:.1f}% error  (0% = perfect match, 100% = no match)\n"
+        f"  {diag}\n\n"
+    )
+
+
 def _detect_stagnation(bc_history: list, tol: float = 1e-4) -> bool:
     """Return True if the last few BCs are nearly identical (no progress)."""
     if len(bc_history) < 3:
@@ -282,7 +295,7 @@ def _detect_stagnation(bc_history: list, tol: float = 1e-4) -> bool:
 # 5. NODES
 # ---------------------------------------------------------------------------
 
-def planner_node(state: ESLState) -> dict:
+def planner_node(state: ControllerState) -> dict:
     """Generate a high-level plan on the first call in plan mode; no-op otherwise."""
     if config.ORCHESTRATOR_MODE != "plan" or state["plan"]:
         return {}
@@ -294,12 +307,11 @@ def planner_node(state: ESLState) -> dict:
         EI           = ps["EI"],
         target_shape = state["target_shape"] or "unspecified",
     )
-    plan = call_llm(prompt=prompt, model="smart", system=_PLAN_SYSTEM,
-                    max_tokens=config.MAX_TOKENS_SMART)
+    plan = call_llm(prompt=prompt, system=_PLAN_SYSTEM)
     return {"plan": plan}
 
 
-def decision_node(state: ESLState) -> dict:
+def decision_node(state: ControllerState) -> dict:
     """Issue the next BC decision and assess convergence."""
     ps = state["physical_system"]
 
@@ -312,6 +324,7 @@ def decision_node(state: ESLState) -> dict:
         plan_section    = _format_plan_section(state["plan"]),
         history_section = _format_history(state["bc_history"], state["shape_history"]),
         current_section = _format_current(state["shape_history"], state["bc_current"]),
+        eval_section    = _format_eval_section(state.get("eval_result", {})),
     )
 
     # BC decision — schema-enforced, never free JSON
@@ -319,9 +332,7 @@ def decision_node(state: ESLState) -> dict:
         prompt      = prompt,
         tool_schema = _BC_SCHEMA,
         tool_name   = "set_boundary_condition",
-        model       = "smart",
         system      = _DECISION_SYSTEM,
-        max_tokens  = config.MAX_TOKENS_FAST,
     )
 
     # Print decision in real-time
@@ -330,6 +341,7 @@ def decision_node(state: ESLState) -> dict:
     print(f"  x0 = {decision['x0']:+.6f} m  |  y0 = {decision['y0']:+.6f} m  |  θ = {decision['theta']:+.6f} rad")
 
     # Convergence assessment
+    eval_result = state.get("eval_result", {})
     convergence = call_llm_with_tool(
         prompt = (
             f"TARGET SHAPE: {state['target_shape']}\n"
@@ -337,16 +349,14 @@ def decision_node(state: ESLState) -> dict:
             f"\n"
             f"CURRENT BEAM STATE (observable nodes shown):\n"
             f"{_format_current(state['shape_history'], state['bc_current'])}\n"
-            f"\n"
-            f"Has the beam been deformed into a {state['target_shape']} shape? "
+            + (_format_eval_section(eval_result) if eval_result else "")
+            + f"\nHas the beam been deformed into a {state['target_shape']} shape? "
             f"Judge by: curvature direction, symmetry, contact with the wall, overall shape match. "
             f"Be strict: the shape must clearly match the target."
         ),
         tool_schema = _CONVERGED_SCHEMA,
         tool_name   = "assess_convergence",
-        model       = "fast",
         system      = "You are a structural mechanics expert. Judge whether the current beam deformation matches the target shape.",
-        max_tokens  = config.MAX_TOKENS_FAST,
     )
 
     # Print convergence assessment in real-time
@@ -373,7 +383,7 @@ def decision_node(state: ESLState) -> dict:
 
 def build_orchestrator_graph():
     """Compile the orchestrator sub-graph: planner_node → decision_node."""
-    graph = StateGraph(ESLState)
+    graph = StateGraph(ControllerState)
 
     graph.add_node("planner",  planner_node)
     graph.add_node("decision", decision_node)
@@ -391,12 +401,11 @@ def build_orchestrator_graph():
 
 def main():
     """Standalone test: run one orchestrator cycle from an empty state."""
-    import config
     from src.models.physical_system import make_physical_system
-    from src.models.state_llm_control import initial_esl_state
+    from src.models.state_llm_control import initial_controller_state
 
     ps    = make_physical_system(config)
-    state = initial_esl_state(ps, target_shape="C", bc_target=[0.0, -0.05, 0.5])
+    state = initial_controller_state(ps, target_shape="C", bc_target=[0.0, -0.05, 0.5])
 
     graph   = build_orchestrator_graph()
     updates = graph.invoke(state)

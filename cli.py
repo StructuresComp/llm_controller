@@ -4,20 +4,20 @@
 # Entry point. Parses arguments, builds the graph, runs it, prints results.
 #
 # Usage:
-#   python cli.py --target C --x0 0.0 --y0 -0.05 --theta 1.57
-#   python cli.py --target C --x0 0.0 --y0 -0.05 --theta 1.57 --H -0.15
+#   python3 cli.py --target C
+#   python3 cli.py --target U --H 0.15
 # ---------------------------------------------------------------------------
 
 import argparse
 
-import config
+from src.core import config
 from src.models.physical_system import make_physical_system
-from src.models.state_llm_control import initial_esl_state
-from workflows.workflow import build_esl_graph
+from src.models.state_llm_control import initial_controller_state
+from src.workflows.workflow import build_controller_graph
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="ESL two-agent simulation framework.")
+    parser = argparse.ArgumentParser(description="LLM controller for deformable objects.")
 
     # Goal
     parser.add_argument(
@@ -49,16 +49,16 @@ def main():
         ps["wall_H"] = -abs(args.H)   # ensure negative (wall is below origin)
 
     # Assemble initial state
-    state = initial_esl_state(
+    state = initial_controller_state(
         physical_system = ps,
         target_shape    = args.target,
     )
 
     # Run the graph
     # recursion_limit accounts for multiple node invocations per cycle:
-    # each cycle = orchestrator sub-graph (planner + decision) + programmer = ~4 steps.
-    graph  = build_esl_graph()
-    result = graph.invoke(state, {"recursion_limit": config.MAX_ITERATIONS * 4})
+    # each cycle = orchestrator sub-graph (planner + decision) + programmer + evaluator = ~5 steps.
+    graph  = build_controller_graph()
+    result = graph.invoke(state, {"recursion_limit": config.MAX_ITERATIONS * 5})
 
     # Print summary
     print("\n" + "="*70)

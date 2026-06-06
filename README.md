@@ -1,4 +1,4 @@
-# ESL Agent Framework — LLM Control of Deformable Objects
+# LLM Controller — LLM Control of Deformable Objects
 
 A two-agent LangGraph framework for using large language models (and future vision models) to control deformable objects. The system uses an LLM as a reactive or strategic controller: it observes the current configuration, reasons about physics, and issues control commands to steer the system toward target shapes.
 
@@ -25,7 +25,7 @@ A two-agent LangGraph framework for using large language models (and future visi
 
 ```
 ┌─────────────────┐
-│   ESLState      │
+│   ControllerState      │
 │  (observations) │
 └────────┬────────┘
          │
@@ -64,7 +64,7 @@ which may point to Python 2 on some systems.
 
 ```bash
 git clone <repo-url>
-cd agents_ESL
+cd llm_controller
 python3 -m venv venv
 source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
@@ -73,7 +73,7 @@ cp .env.example .env
 
 Verify you are inside the venv before running anything:
 ```bash
-which python    # must show .../agents_ESL/venv/bin/python — not /usr/bin/python
+which python    # must show .../llm_controller/venv/bin/python — not /usr/bin/python
 ```
 
 Edit `.env` and add your API key:
@@ -293,7 +293,7 @@ print(f"Diagnostics: {error['diagnostics']}")
 ## Project Structure
 
 ```
-agents_ESL/
+llm_controller/
 ├── cli.py                              # Entry point
 ├── config.py                           # All settings (3 sections)
 ├── paths.py                            # Directory paths (DATA_DIR, LOGS_DIR, etc.)
@@ -305,7 +305,7 @@ agents_ESL/
 ├── src/
 │   ├── models/
 │   │   ├── __init__.py
-│   │   ├── state_llm_control.py        # ESLState TypedDict + initial_esl_state()
+│   │   ├── state_llm_control.py        # ControllerState TypedDict + initial_controller_state()
 │   │   └── physical_system.py          # PhysicalSystem TypedDict + make_physical_system()
 │   │
 │   ├── agents/
@@ -399,7 +399,6 @@ LLM_PROVIDER_FAST = "my_provider"
 
 See `TODO.md` for the full roadmap:
 
-- **Item 11:** Rename ESL throughout (framework is now generic LLM control, not energy-learning specific)
 - **Item 12:** Deterministic shape checker (✓ implemented) — compute shape error independently
 - **Item 13:** Visualization module — render real-time + iteration summary frames, compose video
 - **Item 14:** Evaluation harness — run multiple trials, measure convergence rate and LLM self-assessment accuracy

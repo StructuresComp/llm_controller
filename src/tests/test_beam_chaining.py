@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 
 import numpy as np
-import config
+from src.core import config
 from src.models.physical_system import make_physical_system
 from src.tools.Discrete_Elastic_Beams import discreteBeam
 

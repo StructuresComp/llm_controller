@@ -14,8 +14,8 @@
 # ---------------------------------------------------------------------------
 # 1. IMPORTS
 # ---------------------------------------------------------------------------
-import config
-from src.models.state_llm_control import ESLState
+from src.core import config
+from src.models.state_llm_control import ControllerState
 from src.tools.Discrete_Elastic_Beams import discreteBeam
 
 
@@ -97,7 +97,7 @@ def downsample_configs(configs: dict, max_configs: int) -> dict:
 # 5. NODES
 # ---------------------------------------------------------------------------
 
-def programmer_node(state: ESLState) -> dict:
+def programmer_node(state: ControllerState) -> dict:
     decision = state["decision"]          # {x0, y0, theta} — schema-validated
     ps       = state["physical_system"]
     prev_bc  = list(state["bc_current"])
@@ -165,12 +165,11 @@ def programmer_node(state: ESLState) -> dict:
 
 def main():
     """Standalone test: hardcoded decision, single run from initial state."""
-    import config
     from src.models.physical_system import make_physical_system
-    from src.models.state_llm_control import initial_esl_state
+    from src.models.state_llm_control import initial_controller_state
 
     ps    = make_physical_system(config)
-    state = initial_esl_state(ps, target_shape="C", bc_target=[0.0, -0.05, 0.5])
+    state = initial_controller_state(ps, target_shape="C", bc_target=[0.0, -0.05, 0.5])
     state["decision"] = {"x0": 0.0, "y0": -0.03, "theta": 0.0}
 
     updates = programmer_node(state)

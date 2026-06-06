@@ -289,7 +289,7 @@ def compute_shape_error(
     """
     if check_reflection is None:
         try:
-            import config
+            import src.core.config as config
             check_reflection = bool(config.CHECK_SHAPE_REFLECTION)
         except Exception:
             check_reflection = False

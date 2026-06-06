@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
-# workflows/workflow.py
+# src/workflows/workflow.py
 # ---------------------------------------------------------------------------
-# ESL LangGraph master workflow.
+# LangGraph master workflow.
 #
 # Topology:
 #   [START] → orchestrator → programmer → (converged or error?) → [END]
@@ -15,13 +15,14 @@
 
 from langgraph.graph import END, StateGraph
 
-from src.models.state_llm_control import ESLState
+from src.models.state_llm_control import ControllerState
 from src.agents.orchestrator_agent import build_orchestrator_graph
 from src.agents.programmer_agent import programmer_node
+from src.agents.evaluator_agent import evaluator_node
 
 
-def _should_continue(state: ESLState) -> str:
-    """Route after programmer: loop or end."""
+def _should_continue(state: ControllerState) -> str:
+    """Route after evaluator: loop or end."""
     if state.get("error"):
         return "end"
     if state["converged"]:
@@ -29,16 +30,18 @@ def _should_continue(state: ESLState) -> str:
     return "orchestrator"
 
 
-def build_esl_graph():
-    graph = StateGraph(ESLState)
+def build_controller_graph():
+    graph = StateGraph(ControllerState)
 
     graph.add_node("orchestrator", build_orchestrator_graph())
     graph.add_node("programmer",   programmer_node)
+    graph.add_node("evaluator",    evaluator_node)
 
     graph.set_entry_point("orchestrator")
     graph.add_edge("orchestrator", "programmer")
+    graph.add_edge("programmer",   "evaluator")
     graph.add_conditional_edges(
-        "programmer",
+        "evaluator",
         _should_continue,
         {"orchestrator": "orchestrator", "end": END},
     )

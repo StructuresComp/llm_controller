@@ -684,7 +684,7 @@ def discreteBeam(
 # Run it from the project root: python -m src.tools.Discrete_Elastic_Beams
 #
 if __name__ == "__main__":
-  import config
+  import src.core.config as config
   from src.models.physical_system import make_physical_system
 
   ps     = make_physical_system(config)
