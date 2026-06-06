@@ -1,7 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from langchain.tools import tool
 
 # Helper function
 def crossMat(a):
@@ -665,6 +664,7 @@ def discreteBeam(
       h1 = plt.figure(1)
       plt.clf() # Clear current figure
       plt.plot(x_arr, y_arr, 'ko-')
+      plt.axhline(y=physical_system['wall_H'], color='r', linestyle='--', linewidth=1)
       plt.title(f't={ctime:.4f}s')
       plt.xlabel('x')
       plt.ylabel('y')
