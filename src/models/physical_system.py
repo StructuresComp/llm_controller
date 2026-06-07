@@ -1,58 +1,115 @@
 # ---------------------------------------------------------------------------
 # src/models/physical_system.py
 # ---------------------------------------------------------------------------
-# PhysicalSystem TypedDict and factory function.
+# Physical system class hierarchy and factory.
 #
-# make_physical_system(config) reads raw parameters from config.py,
-# computes all derived quantities once, and returns a plain dict that
-# can be stored in ControllerState and passed directly to physics tools.
+# PhysicalSystemBase  — empty base class; use for isinstance checks / type hints
+# BeamPhysicalSystem  — 2D elastic beam; ndof = 2 * nv
+# RodPhysicalSystem   — 3D elastic rod stub; ndof = 3 * nv - 1 (fields TBD)
 #
-# Tools never import config — they read from PhysicalSystem only.
+# make_physical_system(config) reads config.py, computes derived quantities,
+# and returns the appropriate subclass.  Tools never import config — they
+# read from the PhysicalSystem instance only.
 # ---------------------------------------------------------------------------
 
 import numpy as np
-from typing_extensions import TypedDict
 
 
-class PhysicalSystem(TypedDict):
-    # Identity
-    type:       str          # "beam" (future: "rod", "shell", ...)
+# ---------------------------------------------------------------------------
+# BASE CLASS
+# ---------------------------------------------------------------------------
 
-    # Raw parameters (from config)
-    nv:         int
-    rho:        float        # density (kg/m³)
-    Y:          float        # Young's modulus (Pa)
-    r0:         float        # cross-sectional radius (m)
-    rod_length: float        # total beam length (m)
-    visc:       float        # viscous damping (Pa·s)
-    wall_H:                  float   # wall position: y = wall_H (m)
-    friction:                bool    # True = fix x and y at contact; False = fix y only
-    boundary_velocity:       float   # translational speed of node 0 (m/s)
-    boundary_angle_velocity: float   # rotational speed of node 0 (rad/s)
-
-    # Derived (computed once by make_physical_system)
-    EI:               float  # bending stiffness = Y π r0⁴ / 4
-    EA:               float  # axial stiffness   = Y π r0²
-    deltaL:           float  # edge length = rod_length / (nv - 1)
-    m:                list   # mass vector, length 2*nv (diagonal of mMat)
-    W:                list   # gravity force vector, length 2*nv
-    C_diag:           list   # diagonal of damping matrix C, length 2*nv
-    observable_nodes: list   # node indices shown to orchestrator — set once, never changed
+class PhysicalSystemBase:
+    """Empty base class for all physical system types."""
+    pass
 
 
-def make_physical_system(cfg=None) -> PhysicalSystem:
+# ---------------------------------------------------------------------------
+# BEAM
+# ---------------------------------------------------------------------------
+
+class BeamPhysicalSystem(PhysicalSystemBase):
     """
-    Build a PhysicalSystem from config.py (or a config-like object for testing).
+    Pre-computed physical and derived quantities for a 2D elastic beam.
+    Built once at startup by make_physical_system(); never modified during a run.
 
-    Parameters
-    ----------
-    cfg : module or object, optional
-        Must expose NV, RHO, Y, R0, ROD_LENGTH, VISC, WALL_H, FRICTION.
-        Defaults to the project config module.
+    DOF layout: q = [x0, y0, x1, y1, ..., x_{nv-1}, y_{nv-1}]  (length = ndof = 2*nv)
+    """
 
-    Returns
-    -------
-    PhysicalSystem
+    def __init__(
+        self,
+        nv:         int,
+        rho:        float,
+        Y:          float,
+        r0:         float,
+        rod_length: float,
+        visc:       float,
+        wall_H:                  float,
+        friction:                bool,
+        boundary_velocity:       float,
+        boundary_angle_velocity: float,
+        EI:               float,
+        EA:               float,
+        deltaL:           float,
+        m:                list,
+        W:                list,
+        C_diag:           list,
+        observable_nodes: list,
+    ):
+        self.type       = "beam"
+        self.nv         = nv
+        self.ndof       = 2 * nv
+
+        self.rho        = rho
+        self.Y          = Y
+        self.r0         = r0
+        self.rod_length = rod_length
+        self.visc       = visc
+
+        self.wall_H                  = wall_H
+        self.friction                = friction
+        self.boundary_velocity       = boundary_velocity
+        self.boundary_angle_velocity = boundary_angle_velocity
+
+        self.EI               = EI
+        self.EA               = EA
+        self.deltaL           = deltaL
+        self.m                = m
+        self.W                = W
+        self.C_diag           = C_diag
+        self.observable_nodes = observable_nodes
+
+
+# ---------------------------------------------------------------------------
+# ROD  (stub — fields TBD when rod support lands)
+# ---------------------------------------------------------------------------
+
+class RodPhysicalSystem(PhysicalSystemBase):
+    """
+    Pre-computed physical and derived quantities for a 3D elastic rod.
+    DOF layout: q = [x0,y0,z0, x1,y1,z1, ..., theta0, ..., theta_{nv-2}]
+    ndof = 3*nv + (nv-1) = 3*nv - 1   (positions + twist angles)
+    """
+
+    def __init__(self, nv: int, rod_length: float, **kwargs):
+        self.type       = "rod"
+        self.nv         = nv
+        self.ndof       = 3 * nv - 1
+        self.rod_length = rod_length
+        # remaining fields set from kwargs; proper __init__ TBD with rod support
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+# ---------------------------------------------------------------------------
+# FACTORY
+# ---------------------------------------------------------------------------
+
+def make_physical_system(cfg=None) -> BeamPhysicalSystem:
+    """
+    Build a BeamPhysicalSystem from config.py (or a config-like object for testing).
+    Returns BeamPhysicalSystem.  Extend to dispatch on cfg.physics_type when rod
+    support lands.
     """
     if cfg is None:
         import src.core.config as cfg
@@ -79,8 +136,6 @@ def make_physical_system(cfg=None) -> PhysicalSystem:
     if n_partial > nv:
         raise ValueError(f"N_PARTIAL ({n_partial}) cannot exceed NV ({nv})")
 
-    # Observable nodes: node 0, N_PARTIAL-2 interior nodes, node nv-1.
-    # Computed once here — never recomputed during a run.
     interior = np.round(np.linspace(1, nv - 2, n_partial - 2)).astype(int).tolist()
     observable_nodes = [0] + interior + [nv - 1]
 
@@ -88,7 +143,6 @@ def make_physical_system(cfg=None) -> PhysicalSystem:
     EI     = Y * np.pi * r0**4 / 4
     EA     = Y * np.pi * r0**2
 
-    # Mass vector (diagonal of mMat)
     total_mass = rho * np.pi * r0**2 * rod_length
     m = np.zeros(2 * nv)
     for k in range(nv):
@@ -96,22 +150,18 @@ def make_physical_system(cfg=None) -> PhysicalSystem:
         m[2*k]     = dm
         m[2*k + 1] = dm
 
-    # Gravity force vector
-    # Small x-perturbation (0.001 g) breaks left-right symmetry for the solver.
     g = np.array([0.001, -9.8])
     W = np.zeros(2 * nv)
     for k in range(nv):
         W[2*k]     = m[2*k]     * g[0]
         W[2*k + 1] = m[2*k + 1] * g[1]
 
-    # Diagonal of damping matrix C
     C_diag = np.zeros(2 * nv)
     for k in range(nv):
         C_diag[2*k]     = visc * deltaL
         C_diag[2*k + 1] = visc * deltaL
 
-    return PhysicalSystem(
-        type       = "beam",
+    return BeamPhysicalSystem(
         nv         = nv,
         rho        = rho,
         Y          = Y,
@@ -132,17 +182,19 @@ def make_physical_system(cfg=None) -> PhysicalSystem:
     )
 
 
-def initial_q0(ps: PhysicalSystem) -> list:
+# ---------------------------------------------------------------------------
+# INITIAL CONDITIONS
+# ---------------------------------------------------------------------------
+
+def initial_q0(ps: BeamPhysicalSystem) -> list:
     """Straight vertical initial configuration: nodes at (0,0), (0,-deltaL), ..."""
-    nv     = ps["nv"]
-    deltaL = ps["deltaL"]
-    q = np.zeros(2 * nv)
-    for i in range(nv):
+    q = np.zeros(ps.ndof)
+    for i in range(ps.nv):
         q[2*i]     = 0.0
-        q[2*i + 1] = -i * deltaL
+        q[2*i + 1] = -i * ps.deltaL
     return q.tolist()
 
 
-def initial_u0(ps: PhysicalSystem) -> list:
+def initial_u0(ps: BeamPhysicalSystem) -> list:
     """Zero velocity initial condition."""
-    return [0.0] * (2 * ps["nv"])
+    return [0.0] * ps.ndof

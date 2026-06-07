@@ -9,7 +9,7 @@
 #                 string in myopic mode = no effect); calls LLM with BC
 #                 schema to produce state["decision"].
 #
-# Section order (CLAUDE.md convention):
+# Section order:
 #   1. Imports  2. Schemas  3. Prompts  4. Helpers  5. Nodes  6. Graph  7. Main  8. Entry
 # ---------------------------------------------------------------------------
 
@@ -302,9 +302,9 @@ def planner_node(state: ControllerState) -> dict:
 
     ps = state["physical_system"]
     prompt = _PLAN_PROMPT.format(
-        wall_H       = ps["wall_H"],
-        rod_length   = ps["rod_length"],
-        EI           = ps["EI"],
+        wall_H       = ps.wall_H,
+        rod_length   = ps.rod_length,
+        EI           = ps.EI,
         target_shape = state["target_shape"] or "unspecified",
     )
     plan = call_llm(prompt=prompt, system=_PLAN_SYSTEM)
@@ -317,9 +317,9 @@ def decision_node(state: ControllerState) -> dict:
 
     prompt = _DECISION_PROMPT.format(
         target_shape    = state["target_shape"] or "unspecified",
-        wall_H          = ps["wall_H"],
-        rod_length      = ps["rod_length"],
-        EI              = ps["EI"],
+        wall_H          = ps.wall_H,
+        rod_length      = ps.rod_length,
+        EI              = ps.EI,
         k               = config.K_HISTORY,
         plan_section    = _format_plan_section(state["plan"]),
         history_section = _format_history(state["bc_history"], state["shape_history"]),
@@ -345,7 +345,7 @@ def decision_node(state: ControllerState) -> dict:
     convergence = call_llm_with_tool(
         prompt = (
             f"TARGET SHAPE: {state['target_shape']}\n"
-            f"WALL: at y = {ps['wall_H']:.4f} m\n"
+            f"WALL: at y = {ps.wall_H:.4f} m\n"
             f"\n"
             f"CURRENT BEAM STATE (observable nodes shown):\n"
             f"{_format_current(state['shape_history'], state['bc_current'])}\n"

@@ -1,135 +1,85 @@
-# ---------------------------------------------------------------------------
-# src/tests/test_shape_checker.py
-# ---------------------------------------------------------------------------
-# Tests for the θ-profile-based shape checker.
-# Run from project root:
-#   python -m src.tests.test_shape_checker
-#
-# Each ideal shape is generated with build_ideal_from_edge_profile, which uses
-# exactly the same integration scheme as the evaluator.  This guarantees 0 %
-# RMS error for all ideal shapes regardless of node count.
-#
-# Plot layout (one row per shape, two panels):
-#   Left:  θ(s') profile — provided (relative tangent angles) vs. fitted ideal
-#   Right: XY overlay   — provided nodes vs. ideal shape anchored to node 0
-# ---------------------------------------------------------------------------
+"""
+Profile-fitting round-trip tests.
+
+Each ideal shape is generated with build_ideal_from_edge_profile, then fed
+into profile_loss.  Because generation and evaluation use the same integration
+scheme, round-trip error must be exactly 0%.
+
+Run from project root:
+    python -m src.tests.test_shape_checker
+"""
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from src.tools.shape_checker import (
-    THETA_PROFILES,
-    build_ideal_from_edge_profile,
-    compute_shape_error,
-)
+from src.benchmarks.losses import build_ideal_from_edge_profile, profile_loss
+from src.benchmarks.shapes.beam_C import _profile_c, _fit_c
+from src.benchmarks.shapes.beam_U import _profile_u, _fit_u
+from src.benchmarks.shapes.beam_S import _profile_s, _fit_s
+from src.benchmarks.shapes.beam_L import _profile_l, _fit_l
 
-ARC_LENGTH = 0.10   # beam length (m) — scale only, does not affect shape
-
-
-# ---------------------------------------------------------------------------
-# IDEAL SHAPE GENERATORS
-# Each function calls build_ideal_from_edge_profile with the appropriate
-# profile function and parameters.  Because the test uses the same θ-profile
-# and integration as the evaluator, the round-trip error is exactly 0 %.
-# ---------------------------------------------------------------------------
-
-def create_c_shape(n: int = 9, total_turn: float = np.pi / 2) -> list:
-    """Constant-curvature arc (circular).  Default = quarter-circle (90°)."""
-    return build_ideal_from_edge_profile(
-        THETA_PROFILES["C"], n, ARC_LENGTH, total_turn=total_turn
-    )
+ARC_LENGTH = 0.10
 
 
-def create_u_shape(n: int = 9, total_turn: float = np.pi) -> list:
-    """Semicircle.  total_turn = π by default (can be negative for CCW)."""
-    return build_ideal_from_edge_profile(
-        THETA_PROFILES["U"], n, ARC_LENGTH, total_turn=total_turn
-    )
+def create_c_shape(n: int = 9) -> list:
+    return build_ideal_from_edge_profile(_profile_c, n, ARC_LENGTH, total_turn=np.pi / 2)
 
 
-def create_s_shape(n: int = 9, amplitude: float = 1.2) -> list:
-    """
-    Full-sine θ profile: curves right then left (or vice versa), net turn = 0.
-    amplitude controls the peak tangent deflection (rad).
-    """
-    return build_ideal_from_edge_profile(
-        THETA_PROFILES["S"], n, ARC_LENGTH, amplitude=amplitude
-    )
+def create_u_shape(n: int = 9) -> list:
+    return build_ideal_from_edge_profile(_profile_u, n, ARC_LENGTH, total_turn=np.pi)
 
 
-def create_l_shape(n: int = 9, total_turn: float = np.pi / 2, turn_at: float = 0.65) -> list:
-    """Straight section (θ=0) followed by an abrupt turn at turn_at ∈ [0,1]."""
-    return build_ideal_from_edge_profile(
-        THETA_PROFILES["L"], n, ARC_LENGTH, total_turn=total_turn, turn_at=turn_at
-    )
+def create_s_shape(n: int = 9) -> list:
+    return build_ideal_from_edge_profile(_profile_s, n, ARC_LENGTH, amplitude=1.2)
+
+
+def create_l_shape(n: int = 9) -> list:
+    return build_ideal_from_edge_profile(_profile_l, n, ARC_LENGTH, total_turn=np.pi / 2, turn_at=0.65)
 
 
 # ---------------------------------------------------------------------------
-# PLOT  (two panels per shape)
+# PLOT HELPERS
 # ---------------------------------------------------------------------------
 
-def _extract_provided_theta(nodes: list):
-    """Return (s_norm, dtheta) at edge midpoints, same convention as evaluator."""
+def _extract_theta(nodes: list):
     obs = np.array(nodes)
-    N = len(obs)
     edge_vecs = np.diff(obs, axis=0)
     edge_lengths = np.linalg.norm(edge_vecs, axis=1)
-    arc_length = float(np.sum(edge_lengths))
-
-    s_nodes = np.zeros(N)
-    s_nodes[1:] = np.cumsum(edge_lengths) / arc_length
+    arc = float(np.sum(edge_lengths))
+    s_nodes = np.zeros(len(obs))
+    s_nodes[1:] = np.cumsum(edge_lengths) / arc
     s_edges = (s_nodes[:-1] + s_nodes[1:]) / 2.0
-
-    s0 = s_edges[0]
-    span = s_edges[-1] - s0 + 1e-12
+    s0, span = s_edges[0], s_edges[-1] - s_edges[0] + 1e-12
     s_norm = (s_edges - s0) / span
-
     theta_edges = np.arctan2(edge_vecs[:, 0], -edge_vecs[:, 1])
-    theta_start = float(theta_edges[0])
-    dtheta = (theta_edges - theta_start + np.pi) % (2 * np.pi) - np.pi
+    dtheta = (theta_edges - float(theta_edges[0]) + np.pi) % (2 * np.pi) - np.pi
     return s_norm, dtheta
 
 
-def plot_shape(
-    nodes: list,
-    target_shape: str,
-    result: dict,
-    ax_theta,
-    ax_xy,
-) -> None:
-    """
-    Two-panel plot for one shape.
-      Left  (ax_theta): θ(s') — provided (blue circles) vs. fitted ideal (red dashed)
-      Right (ax_xy):    XY   — provided (blue) vs. ideal anchored to node 0 (red dashed)
-    """
-    obs = np.array(nodes)
+def _plot_case(nodes, profile_fn, result, label, ax_theta, ax_xy):
+    obs   = np.array(nodes)
     ideal = np.array(result["ideal_nodes"])
     params = result["fitted_params"]
-    err = result["error_percent"]
+    err   = result["error_percent"]
 
-    # — θ profile —
-    s_norm, dtheta_prov = _extract_provided_theta(nodes)
-    dtheta_ideal = THETA_PROFILES[target_shape](s_norm, **params)
+    s_norm, dtheta_prov = _extract_theta(nodes)
+    dtheta_ideal = profile_fn(s_norm, **params)
 
-    ax_theta.plot(s_norm, dtheta_prov,  "bo",  label="provided", markersize=6)
-    ax_theta.plot(s_norm, dtheta_ideal, "r--", label="ideal (fitted)", linewidth=2)
+    ax_theta.plot(s_norm, dtheta_prov,  "bo",  markersize=6, label="provided")
+    ax_theta.plot(s_norm, dtheta_ideal, "r--", linewidth=2,  label="ideal (fitted)")
     ax_theta.axhline(0, color="gray", linewidth=0.5, linestyle=":")
-    ax_theta.set_xlabel("s'  (normalised arc-length)")
-    ax_theta.set_ylabel("Δθ  (rad)")
-    ax_theta.set_title(f"θ profile — {target_shape}")
+    ax_theta.set_xlabel("s'")
+    ax_theta.set_ylabel("Δθ (rad)")
+    ax_theta.set_title(f"θ profile — {label}")
     ax_theta.legend(fontsize=8)
 
-    # — XY overlay —
     ax_xy.plot(obs[:, 0],   obs[:, 1],   "bo-",  linewidth=2, markersize=5, label="provided")
     ax_xy.plot(ideal[:, 0], ideal[:, 1], "r--o", linewidth=2, markersize=5, label="ideal")
     ax_xy.set_aspect("equal")
+    ax_xy.invert_yaxis()
     ax_xy.set_xlabel("x (m)")
     ax_xy.set_ylabel("y (m)")
-    ax_xy.invert_yaxis()
-    ax_xy.set_title(
-        f"{target_shape}:  {err:.1f} % error  "
-        f"({result['confidence_percent']:.1f} % confidence)"
-    )
+    ax_xy.set_title(f"{label}: {err:.1f}% error")
     ax_xy.legend(fontsize=8)
 
 
@@ -137,37 +87,38 @@ def plot_shape(
 # TESTS
 # ---------------------------------------------------------------------------
 
-def test_all_shapes() -> None:
-    test_cases = [
-        ("C", create_c_shape),
-        ("U", create_u_shape),
-        ("S", create_s_shape),
-        ("L", create_l_shape),
+def test_all_shapes() -> bool:
+    cases = [
+        ("C", create_c_shape, _profile_c, _fit_c),
+        ("U", create_u_shape, _profile_u, _fit_u),
+        ("S", create_s_shape, _profile_s, _fit_s),
+        ("L", create_l_shape, _profile_l, _fit_l),
     ]
 
-    _, axes = plt.subplots(len(test_cases), 2, figsize=(13, 4 * len(test_cases)))
+    _, axes = plt.subplots(len(cases), 2, figsize=(13, 4 * len(cases)))
 
     print("=" * 60)
-    print("SHAPE CHECKER — ideal shapes, expected error ≈ 0 %")
+    print("PROFILE-FITTING — ideal shapes, expected error ≈ 0 %")
     print("=" * 60)
 
     all_pass = True
-    for i, (target, fn) in enumerate(test_cases):
+    for i, (label, fn, pfn, fitfn) in enumerate(cases):
         nodes  = fn()
-        result = compute_shape_error(nodes, target)
+        result = profile_loss(nodes, pfn, fitfn)
         err    = result["error_percent"]
-        status = "✓ PASS" if err < 1.0 else "✗ FAIL"
+        status = "PASS" if err < 1.0 else "FAIL"
         if err >= 1.0:
             all_pass = False
-        print(f"  {target}: {err:.4f} %  {status}  — {result['diagnostics']}")
-        plot_shape(nodes, target, result, axes[i, 0], axes[i, 1])
+        print(f"  {label}: {err:.4f} %  {status}  — {result['diagnostics']}")
+        _plot_case(nodes, pfn, result, label, axes[i, 0], axes[i, 1])
 
     print("=" * 60)
     print("All passed." if all_pass else "Some tests FAILED.")
 
-    plt.suptitle("Shape checker — ideal shapes (expected ≈ 0 % error)", fontsize=13)
+    plt.suptitle("Profile-fitting — ideal shapes (expected ≈ 0 % error)", fontsize=13)
     plt.tight_layout()
     plt.show()
+    return all_pass
 
 
 def test_perturbations() -> None:
@@ -177,24 +128,20 @@ def test_perturbations() -> None:
     print("=" * 60)
 
     c_nodes = create_c_shape()
-
-    # Add random noise to node positions
     rng = np.random.default_rng(42)
-    noisy = np.array(c_nodes) + rng.normal(0, 0.003, np.array(c_nodes).shape)
-    r = compute_shape_error(noisy.tolist(), "C")
-    print(f"  C + position noise:   {r['error_percent']:.1f} %  (> 0 expected)")
+    noisy = (np.array(c_nodes) + rng.normal(0, 0.003, np.array(c_nodes).shape)).tolist()
 
-    r2 = compute_shape_error(create_u_shape(), "C")
-    print(f"  U tested as C:        {r2['error_percent']:.1f} %  (U has wrong total_turn for C)")
+    cases = [
+        ("C + noise",    noisy,            _profile_c, _fit_c, "> 0 expected"),
+        ("U tested as C", create_u_shape(), _profile_c, _fit_c, "wrong total_turn"),
+        ("S tested as C", create_s_shape(), _profile_c, _fit_c, "sine ≠ ramp"),
+        ("C tested as L", create_c_shape(), _profile_l, _fit_l, "uniform κ ≠ step"),
+        ("L tested as S", create_l_shape(), _profile_s, _fit_s, "step ≠ sine"),
+    ]
 
-    r3 = compute_shape_error(create_s_shape(), "C")
-    print(f"  S tested as C:        {r3['error_percent']:.1f} %  (S profile differs from linear ramp)")
-
-    r4 = compute_shape_error(create_c_shape(), "L")
-    print(f"  C tested as L:        {r4['error_percent']:.1f} %  (uniform κ ≠ concentrated κ)")
-
-    r5 = compute_shape_error(create_l_shape(), "S")
-    print(f"  L tested as S:        {r5['error_percent']:.1f} %  (step ≠ half-sine)")
+    for label, nodes, pfn, fitfn, note in cases:
+        r = profile_loss(nodes, pfn, fitfn)
+        print(f"  {label:<20}  {r['error_percent']:.1f}%   ({note})")
 
     print("=" * 60)
 

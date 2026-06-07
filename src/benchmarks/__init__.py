@@ -1,44 +1,47 @@
-# ---------------------------------------------------------------------------
-# src/benchmarks/__init__.py
-# ---------------------------------------------------------------------------
-# Benchmark registry.
-#
-# A Benchmark bundles everything needed to define one evaluation task:
-#   - a rich target description for the LLM prompt
-#   - a deterministic loss function:  loss_fn(nodes, ps=None) -> dict
-#   - a reference generator:          reference_fn(n, arc_length) -> list[(x,y)]
-#   - a success threshold (error_percent below which the task is solved)
-#
-# Shape files in shapes/ call register() at import time.
-# This module imports all shape modules at the bottom to trigger registration.
-# ---------------------------------------------------------------------------
-
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, Dict
+import importlib
+import sys
+from pathlib import Path
+from typing import Dict
+
+from src.benchmarks.case import BenchmarkCase
 
 
-@dataclass
-class Benchmark:
-    name:               str
-    physics_type:       str      # "beam" or "rod"
-    target_description: str      # rich description passed to the LLM prompt
-    loss_fn:            Callable  # (nodes, ps=None) -> dict with error_percent etc.
-    reference_fn:       Callable  # (n, arc_length) -> list of (x, y) ideal nodes
-    success_threshold:  float = 0.05  # fraction: 0.05 = 5% error
+__all__ = ["BenchmarkCase", "register", "get_benchmark", "list_benchmarks"]
 
 
-_REGISTRY: Dict[str, Benchmark] = {}
+_REGISTRY: Dict[str, BenchmarkCase] = {}
+_discovered = False
 
 
-def register(benchmark: Benchmark) -> None:
-    """Register a benchmark. Called at module level in each shape file."""
-    _REGISTRY[benchmark.name] = benchmark
+def register(case: BenchmarkCase) -> None:
+    """Register a case instance. Called at module level in each shape file."""
+    _REGISTRY[case.name] = case
 
 
-def get_benchmark(name: str) -> Benchmark:
+def _discover() -> None:
+    """
+    Import every *.py file in shapes/ to trigger their register() calls.
+    Runs once; skips modules already in sys.modules (handles running a shape
+    file directly as __main__ via python -m).
+    """
+    global _discovered
+    if _discovered:
+        return
+    _discovered = True
+    shapes_dir = Path(__file__).parent / "shapes"
+    for path in sorted(shapes_dir.glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        module_name = f"src.benchmarks.shapes.{path.stem}"
+        if module_name not in sys.modules:
+            importlib.import_module(module_name)
+
+
+def get_benchmark(name: str) -> BenchmarkCase:
     """Look up a benchmark by name. Raises KeyError with helpful message."""
+    _discover()
     if name not in _REGISTRY:
         raise KeyError(
             f"Unknown benchmark '{name}'. Available: {sorted(_REGISTRY)}"
@@ -48,11 +51,5 @@ def get_benchmark(name: str) -> Benchmark:
 
 def list_benchmarks() -> list:
     """Return all registered benchmark names, sorted."""
+    _discover()
     return sorted(_REGISTRY)
-
-
-# ---------------------------------------------------------------------------
-# Import shape modules to trigger registration.
-# Add new shape modules here when created.
-# ---------------------------------------------------------------------------
-from src.benchmarks.shapes import beam_C, beam_U, beam_S, beam_L  # noqa: E402, F401

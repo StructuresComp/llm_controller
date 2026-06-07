@@ -46,7 +46,7 @@ def main():
     # Build physical system from config, apply any CLI overrides
     ps = make_physical_system(config)
     if args.H is not None:
-        ps["wall_H"] = -abs(args.H)   # ensure negative (wall is below origin)
+        ps.wall_H = -abs(args.H)   # ensure negative (wall is below origin)
 
     # Assemble initial state
     state = initial_controller_state(

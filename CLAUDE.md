@@ -19,7 +19,60 @@ this is the only reliable way to get machine-readable output from an LLM.
 - Convergence assessment → `call_llm_with_tool` with `_CONVERGED_SCHEMA` → Python dict
 - Free-text (planning, summaries) → `call_llm` only (text, never parsed by code)
 
-### 2. Agent file structure (strict order, separated by dashed comment headers)
+### 2. Benchmark case file rules — never violate these.
+
+**A case file in `src/benchmarks/shapes/` is self-contained. It owns everything specific to that case.**
+
+Each case is a class inheriting from `BenchmarkCase` (defined in `src/benchmarks/__init__.py`):
+
+```python
+class CShape(BenchmarkCase):
+    name               = "C"          # string — registry key
+    physics_type       = "beam"       # "beam" or "rod"
+    target_description = "..."        # prose for the LLM prompt
+    success_threshold  = 0.05         # optional, default 0.05
+
+    def reference_fn(self, x0=0.0, y0=0.0, theta=0.0) -> list:
+        # Generate ideal (x, y) nodes anchored at actual node 0's position
+        # and slope.  Uses arc-length s ∈ [0,1] — invariant to node count.
+        # Return None if this case has no reference geometry.
+
+    def loss_fn(self, nodes, ps=None, q_ref=None) -> dict:
+        # Return dict with at least {error_percent, diagnostics}.
+        # May include multiple named sub-losses alongside error_percent.
+
+register(CShape())
+```
+
+**`reference_fn(x0, y0, theta)` — frame-invariant reference geometry.**
+- `x0, y0` — position of node 0 extracted from the actual `q` vector.
+- `theta` — tangent direction at node 0 (0 = pointing straight down, −Y).
+- The ideal shape integrates a `θ*(s)` profile starting from this exact pose.
+- Not all cases need a reference shape — tip-target, contact, and topology cases return `None`.
+
+**`loss_fn(nodes, ps, q_ref=None)` — deterministic error computation.**
+- `nodes` — list of `(x, y)` observable positions from the actual `q`.
+- `ps` — `PhysicalSystemBase` instance (beam or rod); may be `None` in standalone tests.
+- `q_ref` — optional reference from `reference_fn()` for node-wise comparison.
+- A case may compute and return multiple named sub-losses alongside `error_percent`.
+- Never add case-specific logic to `losses.py`.
+
+**`main()` — standalone visualizer.**
+Every case file has a `main()` and a module-level `TEST_CONFIG = None`.
+- `TEST_CONFIG = None` → run shows the ideal reference shape only.
+- Set `TEST_CONFIG` to a hand-typed list of `(x, y)` tuples → run shows both
+  reference and actual overlaid, prints all losses.
+- Run: `python -m src.benchmarks.shapes.beam_C`
+
+**`losses.py` is closed.** Contains only: `extract_turning_angles`, `build_ideal_from_edge_profile`, `profile_loss`, and the 7 atomic primitives (`l_turn`, `l_pos`, `l_angle`, `l_dist`, `l_sign`, `l_inflect`, `l_contact`). Never add case-specific logic there.
+
+**`benchmarks/__init__.py` is closed.** Shape files are auto-discovered. Never add an explicit import line there.
+
+**Adding a new case = one new file in `src/benchmarks/shapes/`. Nothing else changes.**
+
+---
+
+### 3. Agent file structure (strict order, separated by dashed comment headers)
 
 Every agent file must follow this exact section order:
 
@@ -97,7 +150,7 @@ Pure deterministic Python — zero LLM calls.
 ### Evaluator node (`evaluator_node`)
 Pure deterministic Python — zero LLM calls.
 1. Looks up the active benchmark in the registry via `get_benchmark(state["target_shape"])`.
-2. Calls `benchmark.loss_fn(nodes, ps)` against the latest observable configuration.
+2. Calls `benchmark.loss_fn(nodes, ps, q_ref)` against the latest observable configuration.
 3. Writes result to `state["eval_result"]` (error_percent, diagnostics, etc.).
 4. The routing function `_should_continue` reads `state["converged"]` (LLM judgment)
    and `state["error"]` to decide whether to loop or end.
@@ -120,7 +173,7 @@ Defined in `src/models/state_llm_control.py`.
 
 ```
 messages            Annotated[list, add_messages]   LangGraph message history
-physical_system     dict                            PhysicalSystem (built once, never modified)
+physical_system     object                          BeamPhysicalSystem or RodPhysicalSystem (built once, never modified)
 q0_current          list[float]                     Full DOF vector at end of last tool call
 u0_current          list[float]                     Velocity vector at end of last tool call
 ctime_current       float                           Cumulative simulation time (t_start for next call)
@@ -145,13 +198,18 @@ error               str | None
 Defined in `src/models/physical_system.py`. Built once at startup by `make_physical_system(config)`.
 Stored in state and passed directly to physics tools. Never modified during a run.
 
-**Key fields:**
-- Raw: `nv`, `rho`, `Y`, `r0`, `rod_length`, `visc`, `wall_H`, `friction`,
-  `boundary_velocity`, `boundary_angle_velocity`
+**Class hierarchy:**
+- `PhysicalSystemBase` — empty base class for `isinstance` checks and type hints.
+- `BeamPhysicalSystem(PhysicalSystemBase)` — 2D elastic beam. `ndof = 2 * nv`. All fields are **instance attributes accessed via dot notation** (`ps.wall_H`, `ps.nv`, etc.) — never dict-style (`ps["wall_H"]`).
+- `RodPhysicalSystem(PhysicalSystemBase)` — 3D elastic rod stub. `ndof = 3 * nv - 1`. Fields TBD when rod support lands.
+
+**BeamPhysicalSystem fields:**
+- `type = "beam"`, `nv`, `ndof = 2*nv`
+- Raw: `rho`, `Y`, `r0`, `rod_length`, `visc`, `wall_H`, `friction`, `boundary_velocity`, `boundary_angle_velocity`
 - Derived (computed once): `EI`, `EA`, `deltaL`, `m`, `W`, `C_diag`
-- `observable_nodes` — node indices shown to orchestrator. Computed once from `NV` and
-  `N_PARTIAL`: node 0, `N_PARTIAL−2` interior nodes (linspace), node `nv−1`.
-  **Set at initialization, never changed during a run.**
+- `observable_nodes` — node indices shown to orchestrator. Computed once from `NV` and `N_PARTIAL`. **Never changed during a run.**
+
+**DOF layout for beams:** `q = [x0, y0, x1, y1, ..., x_{nv-1}, y_{nv-1}]`. Node `i` → `q[2i], q[2i+1]`. Extraction is a reshape — trivial, no helper needed.
 
 ---
 
@@ -207,7 +265,7 @@ llm_controller/
     │
     ├── models/
     │   ├── state_llm_control.py         # ControllerState TypedDict + initial_controller_state()
-    │   └── physical_system.py           # PhysicalSystem TypedDict + make_physical_system()
+    │   └── physical_system.py           # PhysicalSystemBase, BeamPhysicalSystem, RodPhysicalSystem + make_physical_system()
     │
     ├── agents/
     │   ├── orchestrator_agent.py        # planner_node + decision_node + build_orchestrator_graph()
@@ -217,15 +275,20 @@ llm_controller/
     ├── workflows/
     │   └── workflow.py                  # build_controller_graph() — master LangGraph
     │
+    ├── visualization/
+    │   ├── __init__.py
+    │   └── run_time_visual.py           # plot_shape(), plot_comparison(), plot_grid()
+    │
     ├── benchmarks/
-    │   ├── __init__.py                  # Benchmark dataclass + register() + get_benchmark()
-    │   ├── losses.py                    # Shared loss primitives (profile_loss, etc.)
-    │   ├── visualization.py             # plot_shape(), plot_grid()
-    │   └── shapes/
-    │       ├── beam_C.py                # C-shape: reference_fn, loss_fn, main()
-    │       ├── beam_U.py                # U-shape
-    │       ├── beam_S.py                # S-shape
-    │       └── beam_L.py                # L-shape
+    │   ├── __init__.py                  # re-exports BenchmarkCase; register() + get_benchmark(); auto-discovers shapes/
+    │   ├── case.py                      # BenchmarkCase ABC
+    │   ├── losses.py                    # Primitives: extract_turning_angles, build_ideal_from_edge_profile,
+    │   │                                #   profile_loss, l_turn, l_pos, l_angle, l_dist, l_sign, l_inflect, l_contact — CLOSED
+    │   └── shapes/                      # One file per case — self-contained, self-registering
+    │       ├── beam_C.py                # class CShape(BenchmarkCase): profile/fit fns, reference_fn, loss_fn, main()
+    │       ├── beam_U.py                # class UShape(BenchmarkCase)
+    │       ├── beam_S.py                # class SShape(BenchmarkCase)
+    │       └── beam_L.py                # class LShape(BenchmarkCase)
     │
     ├── llm/
     │   ├── llm.py                       # call_llm(), call_llm_with_tool(), get_langchain_llm()
@@ -234,7 +297,6 @@ llm_controller/
     ├── tools/
     │   ├── Discrete_Elastic_Beams.py    # discreteBeam() — physics + wall contact + BC interpolation
     │   ├── Discrete_Elastic_Rods.py     # discreteRod() — 3D rod physics (in progress)
-    │   ├── shape_checker.py             # compute_shape_error(), build_ideal_from_edge_profile()
     │   └── getConfiguration.py
     │
     └── tests/
@@ -248,22 +310,37 @@ llm_controller/
 
 ## Benchmark System
 
-Each benchmark is a `Benchmark` dataclass registered in `src/benchmarks/__init__.py`:
+Each benchmark is a subclass of `BenchmarkCase` (ABC in `src/benchmarks/__init__.py`).
+
+**Required class attributes** (validated at class definition time):
 - `name` — string key matching `state["target_shape"]` (e.g. `"C"`)
 - `physics_type` — `"beam"` or `"rod"`
 - `target_description` — rich description for the LLM prompt
-- `loss_fn(nodes, ps=None) -> dict` — deterministic loss; wraps `shape_checker.py`
-- `reference_fn(n, arc_length) -> list` — generates the ideal shape at 100% accuracy
-- `success_threshold` — error_percent below which the task is solved
 
-**Adding a new shape:** create one file in `src/benchmarks/shapes/`, register the
-`Benchmark` object, add the import to `src/benchmarks/__init__.py`. Nothing else changes.
+**Optional class attribute:** `success_threshold = 0.05` (error_percent below which task is solved)
 
-**Standalone test:** `python -m src.benchmarks.shapes.beam_C` plots the ideal shape
-and prints the error (expect ~0%).
+**Abstract method:** `loss_fn(self, nodes, ps=None, q_ref=None) -> dict`
+- Returns at minimum `{error_percent, diagnostics}`. May include multiple sub-losses.
+- `nodes` — observable `(x, y)` positions. `ps` — PhysicalSystemBase. `q_ref` — from reference_fn.
 
-**Full registry test:** `python -m src.tests.test_all_shapes` validates all registered
-benchmarks and shows a grid plot.
+**Optional override:** `reference_fn(self, x0=0.0, y0=0.0, theta=0.0) -> list[(x,y)] | None`
+- Anchors ideal shape at `(x0, y0)` with slope `theta` (0 = pointing down, −Y).
+- `x0, y0, theta` come from the actual beam's node 0 — frame-invariant by construction.
+- Shape is parameterised by arc-length `s ∈ [0, 1]` — invariant to node count.
+- Returns `None` (base default) for cases with no reference geometry.
+
+**`losses.py`** — closed. Contains: `extract_turning_angles`, `build_ideal_from_edge_profile`,
+and `profile_loss` (θ-profile RMS fitting). Add a new primitive here only when a real case
+needs it — never speculatively.
+
+**Adding a new case:** create one file in `src/benchmarks/shapes/`. It self-registers.
+Nothing else changes — `__init__.py` auto-discovers all `*.py` files in `shapes/`.
+
+**Standalone visualizer:** `python -m src.benchmarks.shapes.beam_C`
+- `TEST_CONFIG = None` → shows reference shape only.
+- Set `TEST_CONFIG` to hand-typed `(x, y)` pairs → shows reference + actual overlaid, prints loss.
+
+**Full registry test:** `python -m src.tests.test_all_shapes` — validates all registered benchmarks.
 
 ---
 

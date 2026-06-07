@@ -18,15 +18,19 @@
 # Provider can also be inferred from the model name (claude-* → anthropic,
 # gpt-/o1-/o3-/o4-* → openai, gemini-* → gemini).
 
-LLM_PROVIDER = "anthropic"
-MODEL        = "claude-haiku-4-5"
-MAX_TOKENS   = 2048   # hard upper bound on output tokens per LLM call
-
-# Ollama-specific settings (ignored when provider is not "ollama")
-OLLAMA_BASE_URL    = "https://assure-roots-hostels-excessive.trycloudflare.com"
-OLLAMA_TIMEOUT     = 300   # seconds
-OLLAMA_TEMPERATURE = 0.2
-
+qwen = True  # if True, use Qwen models (only available via Ollama for now)
+if qwen:
+    LLM_PROVIDER = "ollama"
+    MODEL        = "qwen2.5:14b"
+    MAX_TOKENS   = 4096
+    # Ollama-specific settings (ignored when provider is not "ollama")
+    OLLAMA_BASE_URL    = "https://assure-roots-hostels-excessive.trycloudflare.com"
+    OLLAMA_TIMEOUT     = 300   # seconds
+    OLLAMA_TEMPERATURE = 0.0
+else:
+    LLM_PROVIDER = "anthropic"
+    MODEL        = "claude-haiku-4-5"
+    MAX_TOKENS   = 2048   # hard upper bound on output tokens per LLM call
 
 # ===========================================================================
 # 2. SIMULATION & VISUALIZATION

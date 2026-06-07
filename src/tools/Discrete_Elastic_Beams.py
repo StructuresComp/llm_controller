@@ -524,18 +524,18 @@ def discreteBeam(
   """
 
   # Unpack physical system
-  nv         = physical_system["nv"]
-  EI         = physical_system["EI"]
-  EA         = physical_system["EA"]
-  deltaL     = physical_system["deltaL"]
-  rod_length = physical_system["rod_length"]
-  wall_H     = physical_system["wall_H"]
-  friction   = physical_system["friction"]
+  nv         = physical_system.nv
+  EI         = physical_system.EI
+  EA         = physical_system.EA
+  deltaL     = physical_system.deltaL
+  rod_length = physical_system.rod_length
+  wall_H     = physical_system.wall_H
+  friction   = physical_system.friction
 
-  m    = np.array(physical_system["m"])
+  m    = np.array(physical_system.m)
   mMat = np.diag(m)
-  W    = np.array(physical_system["W"])
-  C    = np.diag(np.array(physical_system["C_diag"]))
+  W    = np.array(physical_system.W)
+  C    = np.diag(np.array(physical_system.C_diag))
 
   ndof         = 2 * nv
   tol          = EI / rod_length**2 * 1e-3
@@ -555,8 +555,8 @@ def discreteBeam(
 
   # Compute totalTime from boundary velocities if not explicitly provided
   if totalTime is None:
-    bv  = physical_system["boundary_velocity"]
-    bav = physical_system["boundary_angle_velocity"]
+    bv  = physical_system.boundary_velocity
+    bav = physical_system.boundary_angle_velocity
 
     x0_curr, y0_curr = q0[0], q0[1]
     x1_curr, y1_curr = q0[2], q0[3]
@@ -617,8 +617,10 @@ def discreteBeam(
       # Check 1: free node penetrates wall -> add contact
       if not is_wall_contact[i] and q_pred[2*i+1] <= wall_H:
         is_wall_contact[i] = True
-      # Check 2: contact node has wrong-sign reaction -> release
-      if is_wall_contact[i] and reactionForce[2*i+1] <= 0:
+      # Check 2: already-contact node has wrong-sign reaction -> release.
+      # Must be elif: reactionForce at a newly-contacted node is ~0 (it was
+      # free in the predictor), which would incorrectly trigger release.
+      elif is_wall_contact[i] and reactionForce[2*i+1] <= 0:
         is_wall_contact[i] = False
 
     # ------------------------------------------------------------------
@@ -664,7 +666,7 @@ def discreteBeam(
       h1 = plt.figure(1)
       plt.clf() # Clear current figure
       plt.plot(x_arr, y_arr, 'ko-')
-      plt.axhline(y=physical_system['wall_H'], color='r', linestyle='--', linewidth=1)
+      plt.axhline(y=physical_system.wall_H, color='r', linestyle='--', linewidth=1)
       plt.title(f't={ctime:.4f}s')
       plt.xlabel('x')
       plt.ylabel('y')

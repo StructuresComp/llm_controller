@@ -7,7 +7,7 @@
 # physics simulation, updates all state fields, and writes a deterministic
 # natural-language report. Zero LLM calls — entirely deterministic Python.
 #
-# Section order (CLAUDE.md convention):
+# Section order:
 #   1. Imports  2. Schemas  3. Prompts  4. Helpers  5. Nodes  7. Main  8. Entry
 # ---------------------------------------------------------------------------
 
@@ -35,24 +35,24 @@ from src.tools.Discrete_Elastic_Beams import discreteBeam
 # 4. HELPERS
 # ---------------------------------------------------------------------------
 
-def extract_observable_q(q: list, ps: dict) -> list:
-    """Return [x, y] pairs for each node in ps['observable_nodes']."""
+def extract_observable_q(q: list, ps) -> list:
+    """Return [x, y] pairs for each node in ps.observable_nodes."""
     obs = []
-    for i in ps["observable_nodes"]:
+    for i in ps.observable_nodes:
         obs.append([q[2*i], q[2*i + 1]])
     return obs
 
 
-def format_result(result: dict, decision: dict, prev_bc: list, ps: dict) -> str:
+def format_result(result: dict, decision: dict, prev_bc: list, ps) -> str:
     """Build a deterministic natural-language report from one simulation run."""
     x0_prev, y0_prev, theta_prev = prev_bc
     x0_new  = decision["x0"]
     y0_new  = decision["y0"]
     theta_new = decision["theta"]
-    wall_H  = ps["wall_H"]
-    nv      = ps["nv"]
+    wall_H  = ps.wall_H
+    nv      = ps.nv
     q       = result["q_new"]
-    obs_idx = ps["observable_nodes"]
+    obs_idx = ps.observable_nodes
 
     lines = [
         f"Moved node 0 from ({x0_prev:.4f}, {y0_prev:.4f}) θ={theta_prev:.4f} rad "

@@ -20,7 +20,7 @@ class ControllerState(TypedDict):
     # ============ PHYSICAL SYSTEM
     # Pre-computed physical and derived quantities. Built once at startup
     # from config.py via make_physical_system(). Never modified during a run.
-    physical_system: dict
+    physical_system: object  # BeamPhysicalSystem or RodPhysicalSystem
 
     # ============ SIMULATION CONTINUITY
     # Position, velocity, and time at the end of the last tool call.
@@ -67,7 +67,7 @@ class ControllerState(TypedDict):
 
 
 def initial_controller_state(
-    physical_system: dict,
+    physical_system,
     target_shape: str = "",
 ) -> ControllerState:
     from src.models.physical_system import initial_q0, initial_u0

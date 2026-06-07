@@ -1,26 +1,24 @@
-# ---------------------------------------------------------------------------
-# src/tests/test_all_shapes.py
-# ---------------------------------------------------------------------------
-# Registry-wide benchmark validation.
-#
-# For every registered benchmark:
-#   1. Generate the ideal shape via reference_fn().
-#   2. Feed it into loss_fn() — expected error ≈ 0%.
-#   3. Assert error < 1% (round-trip consistency check).
-#   4. Plot all shapes in a grid.
-#
-# Run from project root:
-#   python -m src.tests.test_all_shapes
-# ---------------------------------------------------------------------------
+"""
+Registry-wide benchmark validation.
+
+For every registered benchmark:
+  1. Call reference_fn() to get the ideal shape (no config needed).
+  2. Feed it into loss_fn() — expected error ≈ 0%.
+  3. Assert error < 1% (round-trip consistency check).
+  4. Plot all shapes in a grid.
+
+Run from project root:
+    python -m src.tests.test_all_shapes
+"""
 
 import sys
 import matplotlib.pyplot as plt
 
 from src.benchmarks import _REGISTRY, list_benchmarks
-from src.benchmarks.visualization import plot_grid
+from src.visualization.run_time_visual import plot_grid
 
 
-PASS_THRESHOLD = 1.0   # % — reference shape must score below this
+PASS_THRESHOLD = 1.0
 
 
 def run() -> bool:
