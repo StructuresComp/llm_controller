@@ -31,8 +31,6 @@ A LangGraph framework for using large language models (and future vision models)
 
 **Evaluator node** — deterministic, zero LLM calls. Looks up the active benchmark, runs `loss_fn()`, writes `state["eval_result"]`.
 
-See **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** for how to add new benchmark cases, run tests, and understand the codebase structure.
-
 ---
 
 ## Quick Start
@@ -43,62 +41,93 @@ See **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** for how to add new benchmar
 git clone <repo-url>
 cd llm_controller
 python3 -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
+source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
 ```
 
-Verify you are inside the venv:
-```bash
-which python3   # must show .../llm_controller/venv/bin/python3
-```
-
-Edit `.env` and add your API key:
-```
-ANTHROPIC_API_KEY=your_key_here
-```
-
-### Run the agent loop
+### Run the controller
 
 ```bash
-python3 cli.py --target C
+python3 cli.py --target C                         # predefined shape
+python3 cli.py --target C --H 0.15               # shape + custom wall depth
+python3 cli.py --target tip_reach                # tip-reach benchmark
+python3 cli.py --target C --length 0.15           # override rod length
+python3 cli.py --target snake_L --config my_run.py  # custom config overlay
+python3 cli.py --target C --mode beam            # explicit physics type
 ```
 
 **CLI arguments:**
-- `--target` — shape label: `C`, `U`, `S`, `L`
-- `--H` — override wall depth (e.g., `--H 0.15` sets wall at y = −0.15 m)
 
-### Run benchmark validation
+| Argument | Description |
+|---|---|
+| `--target SHAPE` | Benchmark name: `C`, `U`, `S`, `L`, `snake_L`, `tip_reach`, or any registered case. |
+| `--mode MODE` | Physics type: `beam` (default) or `rod` (under development). Overrides `PHYSICS_TYPE` in config. |
+| `--H DEPTH` | Add a single horizontal floor at `y = -\|H\|` m. Sign is ignored — `--H 0.15` and `--H -0.15` both place the floor at y = −0.15 m. Overrides `WALLS` in config. |
+| `--length L` | Override `ROD_LENGTH` (m). |
+| `--config FILE` | Path to a Python config overlay file (see [Configuration](#configuration)). |
+
+Set `PLOT_IMAGE = 0` in `src/core/config.py` for a headless run (no matplotlib windows).
+
+### Visualize a run
+
+```bash
+python3 visualize.py             # latest run in logs/
+python3 visualize.py logs/run_123.json   # specific run
+```
+
+Writes `viz/index.html` + `viz/data.js`. Open `viz/index.html` in Chrome.
+
+### Run a benchmark standalone
+
+Each shape in `src/benchmarks/shapes/` has a built-in visualizer. Run any of them directly to inspect its reference geometry and loss function without launching the full controller:
+
+```bash
+python3 -m src.benchmarks.shapes.beam_C
+python3 -m src.benchmarks.shapes.beam_U
+python3 -m src.benchmarks.shapes.beam_S
+python3 -m src.benchmarks.shapes.beam_L
+python3 -m src.benchmarks.shapes.beam_snake_L
+```
+
+To also evaluate a real configuration, set `TEST_CONFIG` at the top of the shape file to a list of `(x, y)` tuples (one per observable node) and re-run. It will overlay the actual shape on the reference and print the loss.
+
+To validate all registered benchmarks at once:
 
 ```bash
 python3 -m src.tests.test_all_shapes
-```
-
-### Run physics tool test
-
-```bash
-python3 -m src.tests.test_beam_chaining
 ```
 
 ---
 
 ## Configuration
 
-All settings live in `src/core/config.py`.
+All settings live in `src/core/config.py`. Nothing is hardcoded elsewhere.
 
 ### Section 1 — LLM
 
 | Setting | Default | Description |
 |---|---|---|
-| `LLM_PROVIDER` | `"anthropic"` | Provider: `"anthropic"`, `"openai"`, `"ollama"`, `"fake"` |
-| `MODEL` | `"claude-haiku-4-5"` | Model used for all LLM calls |
-| `MAX_TOKENS` | `2048` | Hard token cap per LLM call |
+| `LOG_LLM_CALLS` | `True` | Write every prompt + response to `logs/<RUN_NAME>.log` |
+| `RUN_NAME` | `""` | Stem for output files: `<RUN_NAME>.json` + `<RUN_NAME>.log`. Empty = auto `run_<timestamp>_<pid>` |
+| `LLM_PROVIDER` | `"ollama"` | Provider: `"anthropic"`, `"openai"`, `"ollama"`, `"fake"` |
+| `MODEL` | `"qwen2.5:14b"` | Model used for all LLM calls |
+| `MAX_TOKENS` | `4096` | Hard token cap per LLM call |
 
-To use Ollama, also set `OLLAMA_BASE_URL` in config.py and `LLM_PROVIDER = "ollama"`.
+For Ollama: set `OLLAMA_BASE_URL`, `OLLAMA_TIMEOUT`, `OLLAMA_TEMPERATURE` in config.  
+For Anthropic: set `ANTHROPIC_API_KEY` in `.env`.
 
-To enable LLM call logging, add `LOG_LLM_CALLS=1` to your `.env`.
+### Section 2 — Agent Perception & Control
 
-### Section 2 — Simulation & Visualization
+| Setting | Default | Description |
+|---|---|---|
+| `OBSERVATION_LEVEL` | `"geometric"` | `"positions"` = raw (x,y); `"geometric"` = + tangent angles + curvature signs |
+| `N_PARTIAL` | `5` | Observable nodes shown to orchestrator |
+| `K_HISTORY` | `5` | Rolling window of (shape, BC) pairs |
+| `ORCHESTRATOR_MODE` | `"plan"` | `"plan"` (grounded strategy) or `"myopic"` (reactive) |
+| `ALLOW_REPLAN` | `False` | If True, clear the plan on stagnation |
+| `MAX_ITERATIONS` | `50` | Hard stop on control cycles |
+
+### Section 3 — Simulation & Visualization
 
 | Setting | Default | Description |
 |---|---|---|
@@ -108,23 +137,14 @@ To enable LLM call logging, add `LOG_LLM_CALLS=1` to your `.env`.
 | `R0` | `1e-2` | Cross-sectional radius (m) |
 | `ROD_LENGTH` | `0.1` | Total beam length (m) |
 | `VISC` | `1000.0` | Viscous damping (Pa·s) |
-| `WALL_H` | `-0.12` | Wall position: y = WALL_H (m, negative) |
+| `WALLS` | `[{"P0": [-10,-0.12], "P1": [10,-0.12]}]` | List of axis-aligned wall segments (horizontal or vertical only). Each `{"P0":[x,y], "P1":[x,y]}` — segment must be parallel to X or Y axis. Outward normal points into the allowed region. Empty list = no wall. |
 | `BOUNDARY_VELOCITY` | `0.05` | Arm translational speed (m/s) |
 | `BOUNDARY_ANGLE_VELOCITY` | `0.05` | Arm rotational speed (rad/s) |
 | `DT` | `0.001` | Physics timestep (s) |
-| `FRICTION` | `True` | True = wall fixes x+y; False = y only |
+| `FRICTION` | `False` | True = wall fixes x+y; False = y only (frictionless) |
 | `PLOT_IMAGE` | `1` | 1 = show plots during simulation, 0 = suppress |
-
-### Section 3 — Agent Perception & Control
-
-| Setting | Default | Description |
-|---|---|---|
-| `OBSERVATION_LEVEL` | `"geometric"` | `"positions"` = raw (x,y); `"geometric"` = + tangent angles + curvature signs |
-| `N_PARTIAL` | `5` | Observable nodes shown to orchestrator |
-| `K_HISTORY` | `5` | Rolling window of (shape, BC) pairs |
-| `ORCHESTRATOR_MODE` | `"plan"` | `"plan"` (grounded strategy) or `"myopic"` (reactive) |
-| `ALLOW_REPLAN` | `False` | If True, clear the plan if stagnation is detected |
-| `MAX_ITERATIONS` | `50` | Hard stop on control cycles |
+| `SAVE_STRIDE` | `5` | Save every Nth physics step per decision (1 = all steps) |
+| `MAX_CONFIGS` | `1000` | Hard cap on stored configurations; oldest trimmed if exceeded |
 
 ---
 
@@ -133,8 +153,8 @@ To enable LLM call logging, add `LOG_LLM_CALLS=1` to your `.env`.
 ```
 llm_controller/
 ├── cli.py                               # Entry point: python3 cli.py --target C
+├── visualize.py                         # Viewer: python3 visualize.py
 ├── requirements.txt
-├── .env.example
 ├── docs/
 │   ├── cases.md                         # Task definitions, losses, metrics
 │   └── paper_outline.md
@@ -142,11 +162,12 @@ llm_controller/
 └── src/
     ├── core/
     │   ├── config.py                    # All tuneable settings
-    │   └── paths.py                     # PROJECT_ROOT, DATA_DIR, LOGS_DIR, etc.
+    │   ├── paths.py                     # PROJECT_ROOT, LOGS_DIR, etc.
+    │   └── save_state.py                # Persist finished run to logs/run_<timestamp>.json
     │
     ├── models/
     │   ├── state_llm_control.py         # ControllerState TypedDict + initial_controller_state()
-    │   └── physical_system.py           # PhysicalSystem TypedDict + make_physical_system()
+    │   └── physical_system.py           # BeamPhysicalSystem + make_physical_system()
     │
     ├── agents/
     │   ├── orchestrator_agent.py        # planner_node + decision_node + build_orchestrator_graph()
@@ -156,10 +177,13 @@ llm_controller/
     ├── workflows/
     │   └── workflow.py                  # build_controller_graph() — master LangGraph
     │
+    ├── visualization/
+    │   ├── run_time_visual.py           # matplotlib plots during simulation
+    │   └── mechview_export.py           # convert run JSON → mechview data.js
+    │
     ├── benchmarks/
-    │   ├── __init__.py                  # Benchmark dataclass + register() + get_benchmark()
-    │   ├── losses.py                    # Shared loss primitives
-    │   ├── visualization.py             # plot_shape(), plot_grid()
+    │   ├── __init__.py                  # BenchmarkCase ABC + register() + get_benchmark()
+    │   ├── losses.py                    # Shared loss primitives — closed
     │   └── shapes/
     │       ├── beam_C.py
     │       ├── beam_U.py
@@ -167,52 +191,120 @@ llm_controller/
     │       └── beam_L.py
     │
     ├── llm/
-    │   └── llm.py                       # Thin adapter over llm_wrapper pip package
+    │   └── llm.py                       # Thin adapter over llm_wrapper; handles logging
     │
     ├── tools/
-    │   ├── Discrete_Elastic_Beams.py    # discreteBeam() — physics + wall contact
-    │   └── shape_checker.py             # compute_shape_error(), θ-profile fitting
+    │   └── Discrete_Elastic_Beams.py    # discreteBeam() — physics + wall contact
     │
     └── tests/
         ├── test_beam_chaining.py
+        ├── test_beam_FDM.py
+        ├── test_shape_checker.py
         └── test_all_shapes.py
 ```
 
 ---
 
+## Output files
+
+Every run writes to `logs/`. The stem is `RUN_NAME` if set, otherwise `run_<timestamp>_<pid>`:
+
+| File | Description |
+|---|---|
+| `logs/<stem>.json` | Full run state: all configurations, BC history, iteration log |
+| `logs/<stem>.log` | Every LLM prompt and response (when `LOG_LLM_CALLS = True`) |
+
+Set `RUN_NAME` in your config overlay so parallel runs produce paired, identifiable files:
+```python
+# experiments/qwen_plan_C.py
+MODEL             = "qwen2.5:14b"
+ORCHESTRATOR_MODE = "plan"
+RUN_NAME          = "qwen_plan_C"
+```
+```bash
+python3 cli.py --target C --config experiments/qwen_plan_C.py
+# → logs/qwen_plan_C.json + logs/qwen_plan_C.log
+```
+
+`visualize.py` reads the run JSON and writes:
+
+| File | Description |
+|---|---|
+| `viz/index.html` | mechview viewer — open in Chrome |
+| `viz/data.js` | Animation data in mechview format |
+
+---
+
 ## LLM Layer
 
-Provider implementations live in the [`llm_wrapper`](https://github.com/agentic-writing/llm_wrapper) package (installed via pip). `src/llm/llm.py` is a thin adapter that reads `LLM_PROVIDER`, `MODEL`, and `MAX_TOKENS` from config and delegates to it.
+Provider implementations live in the [`llm_wrapper`](https://github.com/agentic-writing/llm_wrapper) package (installed via pip). `src/llm/llm.py` is a thin adapter that reads provider/model from config and delegates to it. When `LOG_LLM_CALLS = True`, every prompt and response is appended to `logs/llm_<timestamp>.log`.
 
-To add a new provider, see `CONTRIBUTING.md` in the llm_wrapper repo.
+---
+
+## Visualization
+
+Post-run 3D animation is powered by [`mechview`](https://github.com/StructuresComp/mechview) (installed via pip). `visualize.py` calls `src/visualization/mechview_export.py` to normalise coordinates and write `data.js`, then copies `index.html` from the installed mechview package into `viz/`.
+
+---
+
+## Physics Tool: `discreteBeam`
+
+`src/tools/Discrete_Elastic_Beams.py` — implicit time-integration of a 2D discrete elastic beam.
+
+**Signature:**
+```python
+discreteBeam(physical_system, q0=None, u0=None,
+             control_position, control_angle,
+             t_start=0.0, dt=0.01, totalTime=None,
+             plotImage=0, plotStep=5, save_stride=1) -> dict
+```
+
+**Key behaviours:**
+
+- `q0=None` / `u0=None` → self-initialises to straight-vertical / zero velocity.
+- `totalTime=None` → computed from `max(delta_pos / BOUNDARY_VELOCITY, delta_angle / BOUNDARY_ANGLE_VELOCITY)`.
+- BC interpolates linearly from current position/angle to target over `totalTime`.
+- `t_start` offsets cumulative display time for chaining runs; physics is unaffected.
+- Returns `{status, message, q_new, u_new, ctime, q_history}`.
+
+**Wall behaviour (set via `physical_system.walls`):**
+
+Walls are **axis-aligned** line segments defined by `{"P0": [x0,y0], "P1": [x1,y1]}` — each segment must be either horizontal (same y) or vertical (same x). Diagonal walls are not supported. The outward normal is the edge vector `(P1−P0)` rotated 90° CCW, which for axis-aligned walls reduces to one of ±X or ±Y and encodes which side is allowed. Use large sentinel coordinates (e.g. `±10`) to approximate an infinite wall.
+
+- Compatibility check: `discreteBeam` raises `ValueError` at startup if any free node in `q0` already penetrates a wall. Fix `q0` or wall positions before calling.
+- Contact is resolved with a **predictor/corrector** scheme: the predictor detects new contacts; the corrector re-solves with those nodes pinned to the wall surface.
+- `is_wall_contact[i]` tracks which wall each node is pinned to (−1 = free). Nodes 0 and 1 are never subject to wall logic.
+
+**No-wall behaviour (`walls == []`):**
+
+The tip nodes (nv−2 and nv−1) are **also fixed** throughout the run. Without this, moving node 0 simply translates the beam under gravity — a trivial result. With both ends clamped, driving node 0 produces genuine elastic bending.
 
 ---
 
 ## Benchmark System
 
-Each benchmark is a `Benchmark` dataclass registered in `src/benchmarks/__init__.py`:
-- `loss_fn(nodes, ps) -> dict` — deterministic loss function; returns `error_percent`
-- `reference_fn(n, arc_length) -> list` — generates the ideal target shape
-- `success_threshold` — `error_percent` below which the task is considered solved
+Each benchmark is a subclass of `BenchmarkCase` in `src/benchmarks/shapes/`. Adding a new case = one new file. Nothing else changes.
 
-Standalone test for a single shape:
+- `loss_fn(nodes, ps, q_ref) -> dict` — deterministic; returns at minimum `{error_percent, diagnostics}`
+- `reference_fn(x0, y0, theta) -> list` — ideal target shape anchored at node 0's pose
+- `success_threshold` — `error_percent` below which the task is solved
+
+Standalone visualiser for a single shape:
 ```bash
 python3 -m src.benchmarks.shapes.beam_C
 ```
 
-Full registry validation + grid plot:
+Full registry validation:
 ```bash
 python3 -m src.tests.test_all_shapes
 ```
 
 ---
 
-## Research Context
-
-This framework investigates whether LLMs can serve as effective controllers for physical systems:
+## Research Axes
 
 1. **Plan vs. myopic** — does grounding in a prior strategy improve convergence?
-2. **Observation abstraction** — does geometric reasoning (curvature, tangent angles) outperform raw coordinates?
+2. **Observation abstraction** — does geometric reasoning outperform raw coordinates?
 3. **Self-assessment accuracy** — can the LLM judge convergence correctly?
 4. **LLM vs. VLM** — can vision outperform text for shape judgment?
 

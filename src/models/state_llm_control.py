@@ -38,9 +38,15 @@ class ControllerState(TypedDict):
     shape_history: list   # list of partial configs (N_PARTIAL nodes each)
 
     # ============ ALL CONFIGURATIONS
-    # Full DOF vector from every tool call, keyed by call index (0-based).
-    # Capped at MAX_CONFIGS; downsampled when exceeded (index 0 always kept).
+    # Full DOF vector from every physics step, keyed by sequential int index.
+    # Capped at MAX_CONFIGS; oldest trimmed when exceeded.
     all_configurations: dict
+
+    # Per-frame overlay labels for the viewer.  Same keys as all_configurations.
+    # Set on the last physics frame of each LLM decision so the viewer can
+    # display the control action that produced each state.
+    # Format: {frame_idx: "Step N  x=+0.00  y=−0.00  θ=+0.00"}
+    frame_labels: dict
 
     # ============ TARGET & CONVERGENCE
     target_shape: str    # "C", "U", "S", etc. — set from CLI --target
@@ -81,6 +87,7 @@ def initial_controller_state(
         "bc_history":        [],
         "shape_history":     [],
         "all_configurations": {},
+        "frame_labels":      {},
         "target_shape":      target_shape,
         "converged":         False,
         "decision":          {},

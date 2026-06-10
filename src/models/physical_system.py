@@ -14,6 +14,8 @@
 
 import numpy as np
 
+from src.tools.walls import make_wall_2d
+
 
 # ---------------------------------------------------------------------------
 # BASE CLASS
@@ -44,7 +46,7 @@ class BeamPhysicalSystem(PhysicalSystemBase):
         r0:         float,
         rod_length: float,
         visc:       float,
-        wall_H:                  float,
+        walls:                   list,
         friction:                bool,
         boundary_velocity:       float,
         boundary_angle_velocity: float,
@@ -54,7 +56,8 @@ class BeamPhysicalSystem(PhysicalSystemBase):
         m:                list,
         W:                list,
         C_diag:           list,
-        observable_nodes: list,
+        observable_nodes:  list,
+        controlled_nodes:  list,
     ):
         self.type       = "beam"
         self.nv         = nv
@@ -66,7 +69,7 @@ class BeamPhysicalSystem(PhysicalSystemBase):
         self.rod_length = rod_length
         self.visc       = visc
 
-        self.wall_H                  = wall_H
+        self.walls                   = walls
         self.friction                = friction
         self.boundary_velocity       = boundary_velocity
         self.boundary_angle_velocity = boundary_angle_velocity
@@ -77,7 +80,9 @@ class BeamPhysicalSystem(PhysicalSystemBase):
         self.m                = m
         self.W                = W
         self.C_diag           = C_diag
-        self.observable_nodes = observable_nodes
+        self.observable_nodes  = observable_nodes
+        self.controlled_nodes  = controlled_nodes
+        self.controlled_set    = set(controlled_nodes)   # precomputed; never changes
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +125,7 @@ def make_physical_system(cfg=None) -> BeamPhysicalSystem:
     r0         = cfg.R0
     rod_length = cfg.ROD_LENGTH
     visc       = cfg.VISC
-    wall_H                  = cfg.WALL_H
+    walls                   = [make_wall_2d(s) for s in getattr(cfg, "WALLS", [])]
     friction                = cfg.FRICTION
     boundary_velocity       = cfg.BOUNDARY_VELOCITY
     boundary_angle_velocity = cfg.BOUNDARY_ANGLE_VELOCITY
@@ -138,6 +143,19 @@ def make_physical_system(cfg=None) -> BeamPhysicalSystem:
 
     interior = np.round(np.linspace(1, nv - 2, n_partial - 2)).astype(int).tolist()
     observable_nodes = [0] + interior + [nv - 1]
+
+    # Controlled nodes — HARDCODED FOR SIMPLICITY.
+    # In principle any subset of nodes could be controlled (1 node, 2 nodes,
+    # a midpoint, multiple grippers, etc.).  We fix two specific choices:
+    #
+    #   With walls:    [0, 1] only — the driven end.  Wall contact takes care
+    #                  of the rest; a second clamp would over-constrain the beam.
+    #
+    #   Without walls: [0, 1, nv-2, nv-1] — driven end AND the tip.  Without
+    #                  a wall to stop the free end, moving node 0 would just
+    #                  translate the whole beam under gravity.  Clamping the tip
+    #                  forces genuine elastic bending.
+    controlled_nodes = [0, 1] if walls else [0, 1, nv - 2, nv - 1]
 
     deltaL = rod_length / (nv - 1)
     EI     = Y * np.pi * r0**4 / 4
@@ -168,7 +186,7 @@ def make_physical_system(cfg=None) -> BeamPhysicalSystem:
         r0         = r0,
         rod_length = rod_length,
         visc       = visc,
-        wall_H                  = wall_H,
+        walls                   = walls,
         friction                = friction,
         boundary_velocity       = boundary_velocity,
         boundary_angle_velocity = boundary_angle_velocity,
@@ -179,6 +197,7 @@ def make_physical_system(cfg=None) -> BeamPhysicalSystem:
         W                = W.tolist(),
         C_diag           = C_diag.tolist(),
         observable_nodes = observable_nodes,
+        controlled_nodes = controlled_nodes,
     )
 
 

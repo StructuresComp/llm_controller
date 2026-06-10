@@ -63,6 +63,15 @@ def evaluator_node(state: ControllerState) -> dict:
         return {"eval_result": {}}
 
     result = benchmark.loss_fn(nodes, state["physical_system"])
+    result["solved"] = (result.get("error_percent", 100.0) / 100.0) <= benchmark.success_threshold
+
+    pct = result["error_percent"]
+    thr = benchmark.success_threshold * 100
+    if result["solved"]:
+        print(f"[Evaluator] SOLVED  error={pct:.2f}% ≤ threshold={thr:.1f}%")
+    else:
+        print(f"[Evaluator] error={pct:.2f}%  (threshold={thr:.1f}%)")
+
     return {"eval_result": result}
 
 

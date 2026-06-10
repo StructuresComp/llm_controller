@@ -21,9 +21,13 @@ this is the only reliable way to get machine-readable output from an LLM.
 
 ### 2. Benchmark case file rules — never violate these.
 
-**A case file in `src/benchmarks/shapes/` is self-contained. It owns everything specific to that case.**
+The benchmark system has two layers:
 
-Each case is a class inheriting from `BenchmarkCase` (defined in `src/benchmarks/__init__.py`):
+**`src/benchmarks/shapes/`** — geometric profile definitions. Pure math, no `BenchmarkCase`, no `register()`.
+Each profile file exports `profile_fn(s_norm, **params)` and `fit_fn(s_norm, dtheta)`.
+`profile_tip_reach.py` exports `tip_reach_loss(nodes, target_x, target_y, rod_length)`.
+
+**`src/benchmarks/cases/`** — fully specified experiments. Each file is self-contained:
 
 ```python
 class CShape(BenchmarkCase):
@@ -62,13 +66,13 @@ Every case file has a `main()` and a module-level `TEST_CONFIG = None`.
 - `TEST_CONFIG = None` → run shows the ideal reference shape only.
 - Set `TEST_CONFIG` to a hand-typed list of `(x, y)` tuples → run shows both
   reference and actual overlaid, prints all losses.
-- Run: `python -m src.benchmarks.shapes.beam_C`
+- Run: `python -m src.benchmarks.cases.beam_C`
 
-**`losses.py` is closed.** Contains only: `extract_turning_angles`, `build_ideal_from_edge_profile`, `profile_loss`, and the 7 atomic primitives (`l_turn`, `l_pos`, `l_angle`, `l_dist`, `l_sign`, `l_inflect`, `l_contact`). Never add case-specific logic there.
+**`profile_fitting.py` is closed.** Contains only: `build_ideal_from_edge_profile` and `profile_loss`. Never add case-specific logic there.
 
-**`benchmarks/__init__.py` is closed.** Shape files are auto-discovered. Never add an explicit import line there.
+**`benchmarks/__init__.py` is closed.** Case files are auto-discovered from `cases/`. Never add an explicit import line there.
 
-**Adding a new case = one new file in `src/benchmarks/shapes/`. Nothing else changes.**
+**Adding a new case = one new file in `src/benchmarks/cases/`. Optionally a matching profile file in `src/benchmarks/shapes/` if the shape needs its own `θ*(s)` definition. Nothing else changes.**
 
 ---
 
@@ -114,7 +118,7 @@ at recognizing success is part of what is being studied.
 **Physical setup:**
 - DLO initially hangs straight down along −Y from the origin.
 - X is horizontal, Y is vertical. Gravity acts along −Y.
-- A rigid wall sits at y = WALL_H (negative). Beam length L < |WALL_H|.
+- Rigid walls are axis-aligned segments (horizontal or vertical only — no diagonal walls). Defined in `WALLS` as `{"P0":[x,y], "P1":[x,y]}` pairs. The outward normal points into the allowed region.
 - The agent controls boundary condition (position + slope angle) at the held end.
 - Wall contact mechanics (predictor/corrector, `is_wall_contact` flag per node) live in the physics tool.
 
@@ -208,6 +212,7 @@ Stored in state and passed directly to physics tools. Never modified during a ru
 - Raw: `rho`, `Y`, `r0`, `rod_length`, `visc`, `wall_H`, `friction`, `boundary_velocity`, `boundary_angle_velocity`
 - Derived (computed once): `EI`, `EA`, `deltaL`, `m`, `W`, `C_diag`
 - `observable_nodes` — node indices shown to orchestrator. Computed once from `NV` and `N_PARTIAL`. **Never changed during a run.**
+- `controlled_nodes` — node indices always held fixed by the robot arm; never subject to wall contact logic. Computed once in `make_physical_system`: `[0, 1]` when walls are present, `[0, 1, nv-2, nv-1]` when no walls (tip clamped to prevent rigid-body translation). **Never changed during a run.**
 
 **DOF layout for beams:** `q = [x0, y0, x1, y1, ..., x_{nv-1}, y_{nv-1}]`. Node `i` → `q[2i], q[2i+1]`. Extraction is a reshape — trivial, no helper needed.
 
@@ -225,12 +230,12 @@ Stored in state and passed directly to physics tools. Never modified during a ru
 ### Section 2 — Simulation & Visualization
 | Flag | Default | Meaning |
 |---|---|---|
-| `NV` | 11 | Number of beam vertices |
+| `NV` | 21 | Number of beam vertices |
 | `RHO`, `Y`, `R0`, `ROD_LENGTH`, `VISC` | see config | Physical parameters |
-| `WALL_H` | -0.12 | Wall position: y = WALL_H (m, negative) |
-| `BOUNDARY_VELOCITY` | 0.02 | Translational speed of node 0 (m/s) |
-| `BOUNDARY_ANGLE_VELOCITY` | 0.1 | Rotational speed of node 0 (rad/s) |
-| `FRICTION` | True | True = wall fixes x+y; False = wall fixes y only |
+| `WALLS` | `[{"P0":[-10,-0.12],"P1":[10,-0.12]}]` | Axis-aligned wall segments (horizontal or vertical only). Outward normal points into the allowed region. |
+| `BOUNDARY_VELOCITY` | 0.05 | Translational speed of node 0 (m/s) |
+| `BOUNDARY_ANGLE_VELOCITY` | 0.05 | Rotational speed of node 0 (rad/s) |
+| `FRICTION` | False | True = wall fixes x+y; False = wall fixes y only |
 | `PLOT_IMAGE` | 1 | 1 = show beam plots during simulation, 0 = suppress |
 
 ### Section 3 — Agent Perception & Control
@@ -280,15 +285,23 @@ llm_controller/
     │   └── run_time_visual.py           # plot_shape(), plot_comparison(), plot_grid()
     │
     ├── benchmarks/
-    │   ├── __init__.py                  # re-exports BenchmarkCase; register() + get_benchmark(); auto-discovers shapes/
+    │   ├── __init__.py                  # re-exports BenchmarkCase; register() + get_benchmark(); auto-discovers cases/
     │   ├── case.py                      # BenchmarkCase ABC
-    │   ├── losses.py                    # Primitives: extract_turning_angles, build_ideal_from_edge_profile,
-    │   │                                #   profile_loss, l_turn, l_pos, l_angle, l_dist, l_sign, l_inflect, l_contact — CLOSED
-    │   └── shapes/                      # One file per case — self-contained, self-registering
-    │       ├── beam_C.py                # class CShape(BenchmarkCase): profile/fit fns, reference_fn, loss_fn, main()
-    │       ├── beam_U.py                # class UShape(BenchmarkCase)
-    │       ├── beam_S.py                # class SShape(BenchmarkCase)
-    │       └── beam_L.py                # class LShape(BenchmarkCase)
+    │   ├── profile_fitting.py           # Shared θ-profile math: build_ideal_from_edge_profile, profile_loss — CLOSED
+    │   ├── shapes/                      # Geometric profile definitions — NOT registered
+    │   │   ├── profile_C.py             # profile_c, fit_c — circular arc
+    │   │   ├── profile_S.py             # profile_s, fit_s — full-sine S-curve
+    │   │   ├── profile_U.py             # profile_u, fit_u — semicircle
+    │   │   ├── profile_L.py             # profile_l, fit_l — straight + sharp bend
+    │   │   ├── profile_tip_reach.py     # tip_reach_loss() — Euclidean tip distance
+    │   │   └── profile_custom.py        # make_profile(kappa_fn) — wrap any user function
+    │   └── cases/                       # Fully specified experiments — auto-discovered, self-registering
+    │       ├── beam_C.py                # class CShape(BenchmarkCase) — imports profile_C
+    │       ├── beam_S.py                # class SShape(BenchmarkCase) — imports profile_S
+    │       ├── beam_U.py                # class UShape(BenchmarkCase) — imports profile_U
+    │       ├── beam_L.py                # class LShape(BenchmarkCase) — imports profile_L
+    │       ├── beam_snake_L.py          # L-tube navigation — imports profile_tip_reach
+    │       └── beam_tip_reach.py        # Free-space tip reach — imports profile_tip_reach
     │
     ├── llm/
     │   ├── llm.py                       # call_llm(), call_llm_with_tool(), get_langchain_llm()
@@ -329,18 +342,20 @@ Each benchmark is a subclass of `BenchmarkCase` (ABC in `src/benchmarks/__init__
 - Shape is parameterised by arc-length `s ∈ [0, 1]` — invariant to node count.
 - Returns `None` (base default) for cases with no reference geometry.
 
-**`losses.py`** — closed. Contains: `extract_turning_angles`, `build_ideal_from_edge_profile`,
-and `profile_loss` (θ-profile RMS fitting). Add a new primitive here only when a real case
-needs it — never speculatively.
+**`profile_fitting.py`** — closed. Contains: `build_ideal_from_edge_profile` and `profile_loss`
+(θ-profile RMS fitting). These are the only two functions shared across all profile-based cases.
+Add a new function here only when a real case needs it — never speculatively.
 
-**Adding a new case:** create one file in `src/benchmarks/shapes/`. It self-registers.
-Nothing else changes — `__init__.py` auto-discovers all `*.py` files in `shapes/`.
+**Adding a new case:** create one file in `src/benchmarks/cases/`. It self-registers.
+Optionally add a profile file in `src/benchmarks/shapes/` if the shape needs its own `θ*(s)`.
+Nothing else changes — `__init__.py` auto-discovers all `*.py` files in `cases/`.
 
-**Standalone visualizer:** `python -m src.benchmarks.shapes.beam_C`
+**Standalone visualizer:** `python -m src.benchmarks.cases.beam_C`
 - `TEST_CONFIG = None` → shows reference shape only.
 - Set `TEST_CONFIG` to hand-typed `(x, y)` pairs → shows reference + actual overlaid, prints loss.
 
 **Full registry test:** `python -m src.tests.test_all_shapes` — validates all registered benchmarks.
+Cases where `reference_fn()` returns `None` (tip-reach / navigation) are skipped in the round-trip check.
 
 ---
 

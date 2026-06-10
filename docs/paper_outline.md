@@ -1,5 +1,10 @@
 # Paper Outline: Closed-Loop Behavioral Signatures of LLM Agents Across Language and Physical Control
 
+## Abstract
+As large language models move from answering questions to acting as agents, the central question is no longer only whether they produce the right final answer, but how they update decisions while interacting with the world. We built a closed-loop experimental system in which an LLM orchestrator observes the state of nonlinear deformable-body simulations, calls tools through a multi-agent framework, receives deterministic physical feedback, and revises boundary-control decisions over time. The physical systems are not decorative demos: discrete elastic rods and beams expose bending, stretching, twisting, contact, instability, and infeasible objectives, creating a controlled physical arena where agent behavior can be measured rather than merely described.
+
+This work shows that LLM agents exhibit stable, model-specific decision dynamics that persist from language to physical control. Models that revise, oscillate, overcorrect, persist, or fail to recognize impossible constraints in language show corresponding closed-loop behaviors when controlling deformable physical systems in simulation and hardware. The result reframes physical AI as an experimental instrument for studying agent intelligence: by forcing LLMs to act, fail, recover, and confront physical impossibility, we reveal behavioral fingerprints that are invisible in static benchmarks but essential for deploying agents in the real world.
+
 ## Core Idea
 
 Large language models are increasingly used as agents: they observe a state, make a decision, receive feedback, and revise their next decision. Most evaluations ask whether the final answer or final task outcome is correct. This misses a more fundamental question: how does the agent behave while it is updating its decisions?
@@ -7,6 +12,9 @@ Large language models are increasingly used as agents: they observe a state, mak
 The central claim of this paper is that LLM agents exhibit measurable closed-loop behavioral signatures. These signatures include overcorrection, undercorrection, oscillation, persistence, recovery from bad decisions, and recognition of infeasible objectives. We show that these signatures are not limited to one task domain. The same model-level behaviors that appear in language revision tasks also appear in physical AI control tasks involving discrete elastic rods and beams.
 
 The physical system is not merely a robotics benchmark. It is a controlled scientific instrument for measuring LLM decision dynamics. A rod or beam simulator provides a state, a controllable action space, deterministic task feedback, nonlinear physical consequences, and hard feasibility limits. This allows us to quantify how an LLM agent updates its decisions over time.
+
+## DLO-ControlBench
+We release a standardized closed-loop benchmark for evaluating LLM agents on deformable-object control tasks involving free-space boundary control, contact-mediated shaping, and infeasible/stress objectives.
 
 ---
 

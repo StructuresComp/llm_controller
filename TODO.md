@@ -1,143 +1,107 @@
 # DLO Controller — TODO
 
-Work top-to-bottom. Later items depend on earlier ones.
+Work top-to-bottom within each section. Later sections depend on earlier ones.
 
 ---
 
-## 0. Completed refactoring
+## 0. Completed
 
-- [x] Rename ESL → DLO throughout (state, graph, CLI)
-- [x] `src/core/` — moved `config.py` and `paths.py` out of project root
-- [x] `src/workflows/` — moved `workflow.py` under `src/`
-- [x] `docs/` — paper outline and cases spec moved here
-- [x] Removed dead code: `tool_loader.py`, `tool_loader_YAML.py`, `configs/tools.yaml`
-- [x] `evaluator_agent.py` — deterministic evaluator node in the graph
-- [x] `src/benchmarks/` — Benchmark registry + C, U, S, L shape files with loss, reference, and visualization
-- [x] `src/tests/test_all_shapes.py` — registry-wide validation and grid plot
-
----
-
-## 1. Benchmark / loss refactoring (do first)
-
-### 1a. PhysicalSystem class hierarchy
-
-- [ ] Replace `PhysicalSystem` TypedDict with an empty `PhysicalSystemBase` class
-- [ ] `BeamPhysicalSystem(PhysicalSystemBase)` — all current beam fields as instance attributes; add `ndof = 2 * nv`
-- [ ] `RodPhysicalSystem(PhysicalSystemBase)` — stub; fields TBD when rod support lands
-- [ ] `make_physical_system(config)` returns the right subclass based on `config.physics_type` (currently always beam)
-- [ ] Migrate all dict-style `ps["field"]` access to dot access `ps.field` across: `Discrete_Elastic_Beams.py`, `programmer_agent.py`, `orchestrator_agent.py`, `cli.py`, `state_llm_control.py`
-
-### 1b. losses.py — atomic primitives
-
-- [ ] Delete `pose_loss` and `composite_loss` (case-specific, wrong place)
-- [ ] Write the 7 atomic primitives from `cases.md`, each returning a normalised float:
-  `l_turn`, `l_pos`, `l_angle`, `l_dist`, `l_sign`, `l_inflect`, `l_contact`
-- [ ] Keep `profile_loss` as one valid loss option (wraps `shape_checker`)
-- [ ] File is then closed — new cases compose these primitives, never add to this file
-
-### 1c. Benchmark case files
-
-- [ ] Delete `beam_pose.py`, `beam_S_impossible.py`, `beam_incompatible.py` (built on wrong foundation)
-- [ ] Auto-discover shape files in `benchmarks/__init__.py` (glob `shapes/*.py`) — new case files self-register, no import line needed
-- [ ] Remove `skip_reference_check` from `Benchmark` dataclass
-- [ ] Revert `test_all_shapes.py` to clean state
-
-### 1d. New case file protocol (one file, nothing else changes)
-
-Each `shapes/beam_X.py` defines:
-1. `reference_fn(x0, y0, theta) -> list[(x,y)]` — ideal DOF vector as nodes; visualise standalone
-2. `loss_fn(nodes, ps, q_ref=None) -> dict` — compose atomic primitives; inline custom logic if case-specific
-3. `Benchmark(name, physics_type, target_description, loss_fn, reference_fn, success_threshold)` + `register()`
+- [x] PhysicalSystem class hierarchy — `BeamPhysicalSystem`, `RodPhysicalSystem` stub, dot access
+- [x] `losses.py` atomic primitives — `l_turn`, `l_pos`, `l_angle`, `l_dist`, `l_sign`, `l_inflect`, `l_contact`
+- [x] Benchmark registry — auto-discovery in `benchmarks/__init__.py`, `register()`, `get_benchmark()`
+- [x] Benchmark cases — C, U, S, L with `reference_fn`, `loss_fn`, standalone visualizer
+- [x] `test_all_shapes.py` — registry-wide validation and grid plot
+- [x] `Discrete_Elastic_Beams.py` — multi-wall system, `_update_contacts` / `_build_fixed_index`, `cx`/`cy` contact state, `controlled_nodes`, section headers
+- [x] `physical_system.py` — `walls` list replaces scalar `wall_H`; `_make_wall` converter
+- [x] `mechview_export.py` — one obstacle box per wall, correct surface placement
+- [x] `save_state.py` — run JSON written to `logs/`
+- [x] Visualization — mechview-based 3D viewer via `visualize.py`
 
 ---
 
-## 2. Discrete Elastic Rod support
+## 1. Immediate — needed before `cli.py --target snake_L` works
 
-- [ ] `RodPhysicalSystem` TypedDict (or class):
-  - `nv`, `rod_length`, `rho`, `r0`
-  - `B` (2×2 bending stiffness matrix)
-  - `beta` (twist stiffness GJ)
-  - `EA`, `voronoi_lengths`, `m`, `W_vec` (3D gravity), `C_diag`
-  - `observable_nodes`
+### 1a. `config.py` ✓
+- [x] `WALLS = [...]` list replaces scalar `WALL_H` — done
+
+### 1b. New benchmark: `src/benchmarks/shapes/beam_snake_L.py` ✓
+- [x] `SnakeLCase`: L-tube navigation, tip-reach loss to `(0.05, -0.11)`
+- [x] `target_description` describes tube geometry, corner, strategy hint
+- [x] `loss_fn`: Euclidean tip distance normalised by rod length
+- [x] No `reference_fn`
+- [x] `success_threshold = 0.05`
+- [x] `experiments/snake_L.py` config overlay wires walls + RUN_NAME
+
+### 1c. Observation module ✓
+- [x] `src/core/observation.py` — `describe_walls()`, `describe_nodes()`, `describe_history()`
+- [x] `describe_walls()` classifies topology (L-tube, channel, etc.) before listing segments
+- [x] Orchestrator imports from this module; private helpers removed from `orchestrator_agent.py`
+- [x] `python -m src.core.observation` — standalone test with 3 hand-typed configs
+
+### 1d. Run log — complete the record
+- [ ] `iteration_log` entries include: BC issued `{x0, y0, theta}`, LLM raw reasoning text,
+  LLM convergence judgment, evaluator `error_percent`, wall contact summary
+- [ ] Top-level run JSON includes a `physical_system` block:
+  walls in user-facing `{P0, P1}` format, `nv`, `rod_length`, `EI`, `EA`, `friction`
+- [ ] `save_state.py` serializes the above; `mechview_export.py` already reads `walls`
+
+---
+
+## 2. Near-term benchmarks
+
+- [ ] `beam_snake_T.py` — inverted T navigation: beam enters from top, must exit left or right
+  - Harder: the LLM must commit to a side; ambiguous loss until commitment is made
+  - Design the four walls, loss (tip-reach on chosen side), `target_description`
+
+---
+
+## 3. Discrete Elastic Rod support
+
+- [ ] `RodPhysicalSystem` fields: `nv`, `rod_length`, `rho`, `r0`, `B`, `beta`,
+  `EA`, `voronoi_lengths`, `m`, `W_vec`, `C_diag`, `observable_nodes`
 - [ ] `make_rod_system(config)` factory
-- [ ] `initial_rod_q0(ps)` — packed `[x,y,z × N, θ × (N-1)]`
-- [ ] `initial_rod_u0(ps)` — same layout, all zeros
-- [ ] `rod_programmer_node` — calls `discreteRod()`, unpacks result, updates state
-- [ ] Rod config section: `G` (shear modulus), 3D BCs
-- [ ] `cli.py --mode beam|rod` flag
+- [ ] `initial_rod_q0/u0` — packed `[x,y,z × N, θ × (N-1)]`
+- [ ] `discreteRod` — wall support via same `cx`/`cy` contact abstraction; needs 3D extension
+- [ ] `rod_programmer_node` — calls `discreteRod`, unpacks result, updates state
 - [ ] `OBSERVATION_LEVEL` extended to 3D (Bishop frame / Darboux vectors)
-- [ ] `compute_shape_error` 3D extension (discrete Darboux vector replaces turning angle)
-- [ ] Rod benchmark shapes in `src/benchmarks/shapes/` (helix, etc.)
+- [ ] Rod benchmark shapes — helix, etc.
+- [ ] `cli.py --mode beam|rod` flag
 
 ---
 
-## 2. Visualization (`src/visualization/`)
+## 4. Analysis plots (`src/visualization/plot_run.py`)
 
-Modular visualization tool with a shared data layer and pluggable backends.
-The same saved trial data drives both backends — no re-running the simulation.
+Reads a `logs/run_<timestamp>.json` and produces static diagnostic figures.
+No 3D rendering — that is mechview's job. This module is for paper figures and debugging.
 
-### 2a. Shared data layer
-
-What gets saved per trial (by the agent loop, backend-agnostic):
-
-- [ ] **Full shapes** — complete node positions at every physics timestep (`all_configurations`)
-- [ ] **Observed shapes** — the `N_PARTIAL` nodes the controller actually sees (`shape_history`)
-- [ ] **Controller decisions** — BC issued each iteration: `{x0, y0, theta}` + iteration number + shape error % + LLM convergence call + reasoning string (`iteration_log`)
-- [ ] Saved to `VISUALIZATION_DIR/trial_DATETIME_TARGET_MODE/trial_data.json`
-- [ ] `trial_data.json` schema: topology once (`edges`) + frames array (full + observed nodes + decision overlay per iteration)
-
-### 2b. Matplotlib backend (quick plots, CI-friendly)
-
-- [ ] `render_matplotlib(trial_data, output_dir)` — reads `trial_data.json`, produces static figures
-- [ ] Per-iteration frame: full shape (faded) + observed nodes (highlighted) + BC arrow + shape error % + LLM reasoning quote
-- [ ] Optional `.mp4` via `matplotlib.animation`
-- [ ] Config flags: `SAVE_VIDEO`, `VIDEO_FPS`, `VIDEO_DPI`
-
-### 2c. Three.js backend (papers and videos)
-
-Python generates one self-contained `viewer.html` — no npm, no server, no Python runtime. Double-click to inspect.
-
-- [ ] `render_threejs(trial_data, output_dir)` — reads `trial_data.json`, writes `viewer.html`
-- [ ] Embeds topology + all frames inline; Three.js CDN link only external dependency
-- [ ] Shows full shape + observed nodes (distinct color) + BC annotation per iteration
-- [ ] Optional scalar field coloring: curvature, contact state, shape error
-- [ ] Playback controls: play/pause, frame slider, speed, reset camera, toggle layers
-- [ ] Frame granularity: per-iteration by default; full physics timesteps optional via config flag
+- [ ] `plot_loss(log) -> Figure` — `error_percent` vs. iteration
+- [ ] `plot_control(log) -> Figure` — `x0`, `y0`, `theta` each vs. iteration (3-panel)
+- [ ] `plot_contact(log) -> Figure` — fraction of nodes in contact vs. iteration (if walls present)
+- [ ] `plot_improvement_stability(log) -> Figure` — signed step delta `L_t - L_{t+1}` as a bar chart
+- [ ] `main()` — CLI: `python -m src.visualization.plot_run logs/run_<timestamp>.json`
+  saves all figures to `viz/` alongside mechview output
 
 ---
 
-## 3. Shape checker calibration against real beam data
+## 5. Evaluation harness
 
-- [ ] Run pipeline on C, U, S, L; collect converged `shape_history` entries
-- [ ] Compute `compute_shape_error` on real shapes; verify scores are plausible
-- [ ] Tune profile parameters if real beam shapes require adjusted reference profiles
-
----
-
-## 4. Evaluation harness
-
-Quantitative measurement of controller performance across benchmark shapes.
-
-- [ ] Run N trials per (shape, model, orchestrator_mode) combination
+- [ ] Run N trials per (shape, model, orchestrator_mode)
 - [ ] Record: iterations to convergence, final error %, LLM self-assessment accuracy
-- [ ] Compare plan mode vs. myopic mode across all shapes and iteration budgets
-- [ ] Log all decisions, plans, shape histories, and convergence calls to `LOGS_DIR`
+- [ ] Compare plan vs. myopic across all shapes and iteration budgets
 
 ---
 
-## 5. Packaging (`pyproject.toml`)
+## 5. VLM integration (distant — after LLM pipeline is proven)
 
-- [ ] Add `[project]` metadata and dependency list (mirrors `requirements.txt`)
-- [ ] Define CLI entry point: `llm-controller = "cli:main"`
-- [ ] Keep `[build-system]` minimal; do NOT publish to PyPI
-- [ ] Remove `requirements.txt` once validated with `pip install -e .`
-
----
-
-## 6. VLM integration (distant — after LLM pipeline is proven)
-
-- [ ] Pass rendered frame to VLM alongside target shape description
+- [ ] Pass rendered frame to VLM alongside target description
 - [ ] New VLM provider in `src/llm/providers/`
 - [ ] `call_llm_with_tool` extended to accept image inputs
 - [ ] Orchestrator: VLM mode uses image history instead of coordinate text
 - [ ] Benchmark: LLM (text) vs. VLM (image) on same shapes and iteration budget
+
+---
+
+## 6. Packaging
+
+- [ ] `pyproject.toml` — `[project]` metadata, dependency list, CLI entry point
+- [ ] Remove `requirements.txt` once validated with `pip install -e .`

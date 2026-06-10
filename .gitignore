@@ -4,3 +4,5 @@ venv/
 .env
 logs/
 .claude/
+viz/
+data/

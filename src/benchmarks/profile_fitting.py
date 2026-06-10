@@ -1,38 +1,36 @@
 """
-Loss machinery for benchmark cases.
+src/benchmarks/profile_fitting.py
+----------------------------------
+Shared math for θ-profile benchmark cases (C, S, U, L, and any future shape
+that is described by a tangent-angle curve θ*(s)).
 
-    extract_turning_angles        — discrete curvature κ_i at each interior node
-    build_ideal_from_edge_profile — generate reference nodes from a θ*(s) profile
-    profile_loss                  — fit profile to observed nodes, return RMS error dict
+CONTRACT
+--------
+A θ-profile case defines two things in its shapes/ file:
 
-Never add case-specific logic here.
+    profile_fn(s_norm, **params) -> ndarray
+        Ideal relative turning angle at each normalised arc-length position.
+        s_norm ∈ [0, 1].  θ*(0) = 0 by convention (relative to start tangent).
+
+    fit_fn(s_norm, dtheta) -> dict
+        Fit the free parameters of profile_fn to observed turning angles.
+        Returns a dict whose keys match profile_fn's **params.
+
+These two functions are then passed to build_ideal_from_edge_profile (for
+reference_fn) and profile_loss (for loss_fn) — both defined here.
+
+WHAT LIVES HERE
+---------------
+    build_ideal_from_edge_profile   generate reference nodes from a θ*(s) profile
+    profile_loss                    fit profile to observed nodes, return RMS error dict
+
+Cases that do not use a θ-profile (tip-reach, navigation) import nothing from
+this file — they compute their loss directly in the case file.
 """
 
 import numpy as np
 from typing import Callable, List, Tuple
 
-
-# ---------------------------------------------------------------------------
-# GEOMETRIC PRIMITIVE
-# ---------------------------------------------------------------------------
-
-def extract_turning_angles(nodes: list) -> np.ndarray:
-    """Discrete curvature κ_i = θ_{i+1} − θ_i at each interior node. Length N-2."""
-    obs = np.array(nodes)
-    if len(obs) < 3:
-        return np.array([])
-    theta = np.arctan2(np.diff(obs[:, 0]), -np.diff(obs[:, 1]))
-    kappa = np.diff(theta)
-    return (kappa + np.pi) % (2 * np.pi) - np.pi
-
-
-# ---------------------------------------------------------------------------
-# PROFILE-FITTING  (beam θ-profile cases only)
-#
-# The ideal shape is described by a tangent-angle profile θ*(s) where
-# s ∈ [0, 1] is normalised arc-length.  Both generation and evaluation use
-# edge-midpoint integration so round-trip error is exactly 0%.
-# ---------------------------------------------------------------------------
 
 def build_ideal_from_edge_profile(
     profile_fn: Callable,
@@ -44,15 +42,19 @@ def build_ideal_from_edge_profile(
     **params,
 ) -> List[Tuple[float, float]]:
     """
-    Generate n nodes by integrating profile_fn at edge midpoints.
+    Generate n reference nodes by integrating profile_fn at edge midpoints.
 
-    profile_fn(s_norm, **params) -> relative tangent angles from start direction.
-    s_norm in [0,1].  theta=0 means pointing down (-Y).
-    x0, y0 are the position of node 0 (anchor = actual first node of q).
+    Uses edge midpoints (not node positions) so that profile_loss can do
+    an exact round-trip: feed the output back in and get 0% error.
+
+    theta = 0 means the beam points straight down (−Y).
+    x0, y0 anchor the ideal shape at node 0's actual position.
     """
     ds = arc_length / (n - 1)
     s_nodes = np.linspace(0.0, 1.0, n)
     s_edges = (s_nodes[:-1] + s_nodes[1:]) / 2.0
+
+    # Normalise to [0, 1] over the edge range (not node range) for profile_fn.
     s0, span = s_edges[0], s_edges[-1] - s_edges[0] + 1e-12
     s_norm = (s_edges - s0) / span
 
@@ -66,7 +68,7 @@ def build_ideal_from_edge_profile(
     return nodes
 
 
-def _build_ideal_one_dir(
+def _fit_one_dir(
     obs: np.ndarray,
     profile_fn: Callable,
     fit_fn: Callable,
@@ -79,12 +81,15 @@ def _build_ideal_one_dir(
     if arc_length < 1e-10 or N < 3:
         return obs.tolist(), 0.0, {}
 
+    # Arc-length parameterisation at edge midpoints.
     s_nodes = np.zeros(N)
     s_nodes[1:] = np.cumsum(edge_lengths) / arc_length
     s_edges = (s_nodes[:-1] + s_nodes[1:]) / 2.0
     s0, span = s_edges[0], s_edges[-1] - s_edges[0] + 1e-12
     s_norm = (s_edges - s0) / span
 
+    # Observed tangent angles at each edge; strip the absolute start angle
+    # so dtheta is purely the relative turning (what profile_fn models).
     theta_edges = np.arctan2(edge_vecs[:, 0], -edge_vecs[:, 1])
     theta_start = float(theta_edges[0])
     dtheta = (theta_edges - theta_start + np.pi) % (2 * np.pi) - np.pi
@@ -107,11 +112,11 @@ def profile_loss(nodes: list, profile_fn: Callable, fit_fn: Callable) -> dict:
     """
     Fit profile_fn to observed nodes and return normalised RMS error.
 
-    profile_fn and fit_fn are defined in the case file — this function has no
-    knowledge of what shape is being evaluated.
+    error_percent = 0   → nodes lie exactly on the ideal profile.
+    error_percent = 100 → error equals the full arc length (maximally wrong).
 
-    Returns dict with error_percent, confidence_percent, ideal_nodes,
-    rms_normalized, fitted_params, diagnostics.
+    Returns: error_percent, confidence_percent, ideal_nodes,
+             rms_normalized, fitted_params, diagnostics.
     """
     obs = np.array(nodes)
     if len(obs) < 3:
@@ -123,9 +128,11 @@ def profile_loss(nodes: list, profile_fn: Callable, fit_fn: Callable) -> dict:
             "fitted_params":      {},
             "diagnostics":        "Need at least 3 nodes.",
         }
-    ideal, rms, params = _build_ideal_one_dir(obs, profile_fn, fit_fn)
+
+    ideal, rms, params = _fit_one_dir(obs, profile_fn, fit_fn)
     error_percent = min(rms * 100.0, 100.0)
-    diag = "Shape matches profile well." if error_percent < 2.0 else (
+    diag = (
+        "Shape matches profile well." if error_percent < 2.0 else
         f"Fit params: { {k: f'{v:.3f}' for k, v in params.items()} }  →  {error_percent:.1f}% error."
     )
     return {
@@ -136,5 +143,3 @@ def profile_loss(nodes: list, profile_fn: Callable, fit_fn: Callable) -> dict:
         "fitted_params":      params,
         "diagnostics":        diag,
     }
-
-

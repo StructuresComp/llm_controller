@@ -30,8 +30,13 @@ def run() -> bool:
 
     all_pass = True
     for name in names:
-        bm     = _REGISTRY[name]
-        nodes  = bm.reference_fn()
+        bm    = _REGISTRY[name]
+        nodes = bm.reference_fn()
+        if nodes is None:
+            # Tip-reach / navigation cases have no reference geometry.
+            # Round-trip check is not applicable; mark as skipped.
+            print(f"  [SKIP]  {name:6s}  (no reference shape — tip-reach case)")
+            continue
         result = bm.loss_fn(nodes)
         err    = result.get("error_percent", 100.0)
         status = "PASS" if err < PASS_THRESHOLD else "FAIL"

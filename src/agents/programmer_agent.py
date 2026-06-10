@@ -49,15 +49,24 @@ def format_result(result: dict, decision: dict, prev_bc: list, ps) -> str:
     x0_new  = decision["x0"]
     y0_new  = decision["y0"]
     theta_new = decision["theta"]
-    wall_H  = ps.wall_H
     nv      = ps.nv
     q       = result["q_new"]
     obs_idx = ps.observable_nodes
 
+    if ps.walls:
+        wall_str = "; ".join(
+            f"y={w['d']/w['n'][1]:.4f} m" if abs(w['n'][1]) >= abs(w['n'][0])
+            else f"x={w['d']/w['n'][0]:.4f} m"
+            for w in ps.walls
+        )
+        wall_line = f"Wall(s) at: {wall_str}."
+    else:
+        wall_line = "No wall."
+
     lines = [
         f"Moved node 0 from ({x0_prev:.4f}, {y0_prev:.4f}) θ={theta_prev:.4f} rad "
         f"to ({x0_new:.4f}, {y0_new:.4f}) θ={theta_new:.4f} rad.",
-        f"Wall is at y = {wall_H:.4f} m.",
+        wall_line,
         f"Simulation: {result['message']}",
         "",
         "DLO configuration (observable nodes):",
@@ -80,16 +89,16 @@ def append_and_trim(history: list, item, max_len: int) -> list:
     return (history + [item])[-max_len:]
 
 
-def downsample_configs(configs: dict, max_configs: int) -> dict:
+def trim_configs(configs: dict, max_configs: int) -> dict:
     """
-    If len(configs) > max_configs, halve by deleting every other entry
-    starting from index 1. Index 0 (initial configuration) is always kept.
-    Re-indexes remaining entries as 0, 1, 2, ...
+    Fallback guard: if len(configs) > max_configs, drop the oldest entries
+    (lowest keys) so recent history is always preserved. Re-indexes from 0.
+    SAVE_STRIDE is the primary control; this should rarely trigger.
     """
     if len(configs) <= max_configs:
         return configs
-    sorted_keys = sorted(configs)
-    kept = [sorted_keys[0]] + [k for k in sorted_keys[1:] if sorted_keys.index(k) % 2 == 0]
+    sorted_keys = sorted(configs.keys(), key=int)
+    kept = sorted_keys[-max_configs:]
     return {new_k: configs[old_k] for new_k, old_k in enumerate(kept)}
 
 
@@ -112,6 +121,7 @@ def programmer_node(state: ControllerState) -> dict:
         control_angle    = decision["theta"],
         dt               = config.DT,
         plotImage        = config.PLOT_IMAGE,
+        save_stride      = config.SAVE_STRIDE,
     )
 
     if result["status"] == "failed_convergence":
@@ -122,11 +132,31 @@ def programmer_node(state: ControllerState) -> dict:
     # --- Update continuity fields ---
     bc_current = [decision["x0"], decision["y0"], decision["theta"]]
 
-    # --- Update all_configurations (append + downsample) ---
-    configs     = dict(state["all_configurations"])
-    run_no      = len(configs)
-    configs[run_no] = q_new
-    configs     = downsample_configs(configs, config.MAX_CONFIGS)
+    # --- Update all_configurations and frame_labels ---
+    # Append every snapshot from this decision's q_history (already strided
+    # by SAVE_STRIDE inside discreteBeam; final step always included).
+    # Label the last frame of this decision so the viewer can display what
+    # control action produced it.
+    # Then apply MAX_CONFIGS as a hard fallback guard, trimming oldest.
+    configs  = dict(state["all_configurations"])
+    labels   = dict(state["frame_labels"])
+    next_idx = len(configs)
+    q_history = result.get("q_history", [q_new])
+    for i, q in enumerate(q_history):
+        configs[next_idx + i] = q
+
+    x0    = decision["x0"]
+    y0    = decision["y0"]
+    theta = decision["theta"]
+    iteration_num = len(state["iteration_log"]) + 1
+    labels[next_idx + len(q_history) - 1] = (
+        f"Step {iteration_num}  "
+        f"x={x0:+.4f}  y={y0:+.4f}  θ={theta:+.3f} rad"
+    )
+
+    configs = trim_configs(configs, config.MAX_CONFIGS)
+    # Keep labels in sync — drop any whose frame was trimmed away
+    labels  = {k: v for k, v in labels.items() if k in configs}
 
     # --- Update rolling histories (observable nodes only) ---
     obs_q   = extract_observable_q(q_new, ps)
@@ -151,6 +181,7 @@ def programmer_node(state: ControllerState) -> dict:
         "ctime_current":     result["ctime"],
         "bc_current":        bc_current,
         "all_configurations": configs,
+        "frame_labels":      labels,
         "shape_history":     shape_history,
         "bc_history":        bc_history,
         "result":            report,

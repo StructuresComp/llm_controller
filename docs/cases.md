@@ -15,8 +15,16 @@ This document covers task definitions, losses, metrics, and the experimental pro
 
 **Implementation status:**
 - Beams (2D, wall contact): C, U, S, L — implemented in `src/benchmarks/shapes/`
+- Navigation cases (snake, T): designed, not yet implemented
 - Rods (3D): in progress
-- Language tasks: deferred
+
+---
+
+## Infeasibility
+
+Infeasibility is **not a separate task class**. Any task from any class may be feasible or infeasible depending on geometry, beam length, wall spacing, or control limits. The same S-shape benchmark is feasible with sufficient freedom and infeasible under tight endpoint constraints. The same tube navigation is feasible with a thin beam and infeasible if the tube is narrower than the beam diameter.
+
+Infeasibility is a property of a (task, physical_system) pair, not of a task type. Cases that are known to be infeasible are flagged explicitly and are valuable for testing whether the LLM recognizes the limit rather than spinning out.
 
 ---
 
@@ -28,6 +36,7 @@ This document covers task definitions, losses, metrics, and the experimental pro
 - Endpoint pose (position + slope/angle)
 - Current boundary condition
 - Current task loss (from the deterministic evaluator)
+- Wall geometry (prose description via `convert_wall_to_language`)
 
 ## Observation modes
 
@@ -218,15 +227,15 @@ Useful for supplement and interpretation.
 
 ---
 
-# 6. Task Category A: Free-Space Boundary Control
+# 6. Task Class 1: Free-Space Shape Formation
 
-No wall contact required. One end fixed, agent controls the other.
+No wall contact. One end fixed, agent controls the other. Shape loss only.
 
 Controls: `x0, y0, theta` (2D beam) or `position, orientation, twist` (3D rod).
 
 ---
 
-## A1. C-Shape ✓
+## 1.1. C-Shape ✓
 
 **Goal:** Smooth single-sided arc, constant curvature.
 
@@ -239,7 +248,7 @@ L_C = w_turn*(Theta - Theta_C)^2 + w_sign*(1 - S_curv) + w_dist*(d_end - d_C)^2
 
 ---
 
-## A2. U-Shape ✓
+## 1.2. U-Shape ✓
 
 **Goal:** Deep semicircular bend, turning angle near π, endpoints close together.
 
@@ -252,7 +261,7 @@ L_U = w_turn*(Theta - pi)^2 + w_dist*(d_end - d_U)^2 + w_sign*(1 - S_curv)
 
 ---
 
-## A3. Endpoint Pose Matching
+## 1.3. Endpoint Pose Matching
 
 **Goal:** Reach a prescribed tip position and slope.
 
@@ -265,7 +274,7 @@ L_pose = w_pos*||p_tip - p_target||^2 + w_angle*wrap(theta_tip - theta_target)^2
 
 ---
 
-## A4. Free-Space S-Shape Attempt ✓
+## 1.4. Free-Space S-Shape ✓
 
 **Goal:** Produce an S-curve using only endpoint control.
 
@@ -274,13 +283,14 @@ L_pose = w_pos*||p_tip - p_target||^2 + w_angle*wrap(theta_tip - theta_target)^2
 L_S = w_inflect*(N_inflect - 1)^2 + w_pose*L_pose + w_balance*curvature_balance_error
 ```
 
-**Note:** May be infeasible under restricted boundary controls. That is useful — see C1.
+**Infeasible variant:** Tighten endpoint constraints so the S cannot be achieved.
+Expected behavior: loss plateaus, agent should recognize stagnation.
 
-**Behavioral use:** Tests infeasibility recognition alongside shape-following.
+**Behavioral use:** Tests shape following with a single inflection; infeasible variant tests recognition.
 
 ---
 
-## A5. Twist-Controlled Rod Shape (3D)
+## 1.5. Twist-Controlled Rod Shape (3D)
 
 **Goal:** Use endpoint twist to produce a desired twisted rod state.
 
@@ -289,11 +299,9 @@ L_S = w_inflect*(N_inflect - 1)^2 + w_pose*L_pose + w_balance*curvature_balance_
 L_twist = w_pos*||p_tip - p_target||^2 + w_rot*d_SO3(R_tip, R_target)^2 + w_twist*(Phi - Phi_target)^2
 ```
 
-**Behavioral use:** Tests whether the agent handles rotational controls, not just planar bending.
-
 ---
 
-## A6. Single-Helix Formation (3D)
+## 1.6. Single-Helix Formation (3D)
 
 **Goal:** Produce one stable helical turn.
 
@@ -302,20 +310,20 @@ L_twist = w_pos*||p_tip - p_target||^2 + w_rot*d_SO3(R_tip, R_target)^2 + w_twis
 L_helix = w_turns*(N_turns - 1)^2 + w_radius*(r - r_target)^2 + w_pitch*(p - p_target)^2 + w_pose*L_pose
 ```
 
-**Behavioral use:** Tests 3D spatial reasoning and twist/bending coupling.
+**Infeasible variant:** Request N_turns beyond the physically stable limit.
 
 ---
 
-# 7. Task Category B: Contact-Mediated Deformation
+# 7. Task Class 2: Contact-Mediated Shape Formation
 
-Contact with walls, pegs, or obstacles is required or expected.
-The agent must use the physical environment as an affordance.
+One or a small number of walls. Contact is an affordance — the agent must use the
+wall to create curvature it could not produce alone, or avoid it while shaping.
 
 ---
 
-## B1. Wall-Induced C-Shape ✓
+## 2.1. Wall-Induced C-Shape ✓
 
-**Goal:** Push the beam against a wall so contact creates a C-like curve.
+**Goal:** Push the beam against a horizontal wall so contact creates a C-like curve.
 
 **Loss:**
 ```
@@ -323,37 +331,48 @@ L_wall_C = L_C + w_contact*contact_location_error
 ```
 
 **Behavioral use:** Tests whether the agent learns to use contact to create curvature.
-This is the primary task in the current pipeline.
+Primary task in the current pipeline.
 
 ---
 
-## B2. Corner-Induced L-Shape ✓
+## 2.2. Corner-Induced L-Shape ✓
 
-**Goal:** Use a wall or corner to produce an L-like configuration.
+**Goal:** Use a wall corner to produce an L-like configuration.
 
 **Loss:**
 ```
 L_corner_L = w_angle*wrap(Theta - pi/2)^2 + w_tip*||p_tip - p_target||^2 + w_contact*contact_location_error
 ```
 
-**Behavioral use:** Tests contact-mediated direction change.
-
 ---
 
-## B3. Two-Obstacle S-Shape
+## 2.3. Two-Obstacle S-Shape
 
-**Goal:** Use two contacts to create opposite-signed curvature.
+**Goal:** Use two contacts with opposite-facing walls to create opposite-signed curvature.
 
 **Loss:**
 ```
 L_contact_S = w_inflect*(N_inflect - 1)^2 + w_contact*contact_pattern_error + w_pose*L_pose
 ```
 
-**Behavioral use:** Tests multi-contact planning for a shape that may be hard in free space.
+**Behavioral use:** Tests multi-contact planning for a shape that is hard in free space.
 
 ---
 
-## B4. Peg-Assisted U-Shape
+## 2.4. Narrow-Slot Insertion
+
+**Goal:** Insert the beam through a finite-width horizontal slot as far as possible.
+
+**Loss:** Tip horizontal penetration depth beyond the slot entrance.
+
+**Infeasible variant:** Slot height < beam diameter. Agent cannot enter; should recognize
+the geometric constraint rather than repeatedly attempting insertion.
+
+**Behavioral use:** Tests contact-aware pushing and infeasibility recognition via geometry.
+
+---
+
+## 2.5. Peg-Assisted U-Shape
 
 **Goal:** Wrap the beam around a peg to form a U.
 
@@ -362,66 +381,66 @@ L_contact_S = w_inflect*(N_inflect - 1)^2 + w_contact*contact_pattern_error + w_
 L_peg_U = L_U + w_wrap*(alpha_wrap - alpha_target)^2 + w_contact*contact_consistency_error
 ```
 
-**Behavioral use:** Tests contact-aware shaping with a geometric affordance.
+---
+
+# 8. Task Class 3: Multi-Wall Navigation
+
+Multiple walls form a channel or obstacle field. The beam must thread through
+a constrained path. Shape along the way is determined by the walls; the task
+goal is tip placement at a target unreachable without navigating the geometry.
+
+These tasks require spatial planning — the LLM must commit to a path, not just
+correct a shape signal step by step.
 
 ---
 
-# 8. Task Category C: Stress, Instability, and Infeasible Tasks
+## 3.1. L-Tube Navigation (snake)
 
-These expose failure modes. Does the agent stabilize, recover, or recognize infeasibility?
+**Geometry:** An L-shaped tube — vertical entry channel, 90° bend, horizontal exit.
+Four walls (right end cap removed so tube is open). Dimensions roughly:
+vertical channel x ∈ [−0.01, 0.01], horizontal channel y ∈ [−0.12, −0.10].
 
----
-
-## C1. Impossible Free-Space S-Shape
-
-**Goal:** Request an S-shape under controls that cannot produce it.
-
-**Loss:** Same as A4.
-
-**Expected behavior:** The agent should eventually recognize the target is unreachable
-and stop escalating controls.
-
-**Behavioral use:** Tests infeasibility recognition.
-
----
-
-## C2. Incompatible Endpoint Pose and Curvature
-
-**Goal:** Demand endpoint pose and turning angle that cannot coexist.
+**Goal:** Thread the tip through the L-bend and reach target `(x*, y*)` near the
+open end of the horizontal channel.
 
 **Loss:**
 ```
-L_incompat = w_pose*L_pose + w_turn*(Theta - Theta_target)^2 + w_sign*(1 - S_curv)
+L_snake = ||p_tip - p_target||^2 / rod_length^2
 ```
 
-**Expected behavior:** Loss cannot be driven below threshold.
+**Infeasible variant:** Reduce the channel width below the beam's natural bending radius.
+The beam cannot negotiate the bend.
 
-**Behavioral use:** Tests whether the agent recognizes conflicting objectives.
+**Behavioral use:** Simplest navigation task. One decision point (commit to the bend),
+one target. Tests whether the LLM plans globally rather than correcting locally.
+
+**Implementation:** `src/benchmarks/shapes/beam_snake.py` — Class 3, no `reference_fn`.
 
 ---
 
-## C3. Near-Buckling Control
+## 3.2. Inverted-T Navigation
 
-**Goal:** Push close to an instability threshold while maintaining controlled shape.
+**Geometry:** A vertical entry stem connects to a horizontal bar at the bottom.
+The horizontal bar is open at both ends (left and right exit). Five walls total.
 
-**Loss:**
 ```
-L_buckling = w_pose*L_pose + w_shape*L_target_shape + w_instability*instability_penalty
+         entry
+           |
+    -------+-------
+    (left)     (right)
 ```
 
-**Behavioral use:** Tests oscillation behavior near sensitive nonlinear regimes.
+**Goal:** Thread the beam through the stem and reach a specified target at one
+of the two exits. Which exit is specified in the task; the other is a distractor.
 
----
+**Loss:** Tip distance to the designated exit target.
 
-## C4. Multi-Turn Helix Beyond Stability (3D)
+**Infeasible variant:** Target on one side with walls that make that side unreachable
+given the beam's bending stiffness.
 
-**Goal:** Request more helical turns than the rod can stably sustain.
-
-**Loss:** Same as A6 with `N_target` beyond the stable limit.
-
-**Expected behavior:** Agent detects saturation rather than endlessly increasing twist.
-
-**Behavioral use:** Tests physical-limit recognition.
+**Behavioral use:** Harder than L-tube. Two possible paths create ambiguity. The LLM
+must commit early and cannot recover cheaply if it chooses the wrong direction.
+Tests forward planning and irreversible decision-making.
 
 ---
 
@@ -429,21 +448,20 @@ L_buckling = w_pose*L_pose + w_shape*L_target_shape + w_instability*instability_
 
 A focused subset for the primary scientific claims.
 
-| # | Task | Category | Physics |
-|---|------|----------|---------|
-| 1 | C-shape (wall) | B1 | beam |
-| 2 | U-shape (wall) | B1 variant | beam |
-| 3 | L-shape (corner) | B2 | beam |
-| 4 | S-shape attempt | A4 / C1 | beam |
-| 5 | Endpoint pose matching | A3 | beam |
-| 6 | Impossible S-shape | C1 | beam |
-| 7 | Incompatible pose + curvature | C2 | beam |
-| 8 | Single helix | A6 | rod |
-| 9 | Near-buckling | C3 | beam or rod |
-| 10 | Multi-turn helix beyond stability | C4 | rod |
+| # | Task | Class | Physics | Status |
+|---|------|-------|---------|--------|
+| 1 | C-shape (wall-assisted) | 2.1 | beam | ✓ |
+| 2 | U-shape (wall-assisted) | 2.1 variant | beam | ✓ |
+| 3 | L-shape (corner) | 2.2 | beam | ✓ |
+| 4 | S-shape (free space) | 1.4 | beam | ✓ |
+| 5 | S-shape (infeasible) | 1.4 infeasible | beam | planned |
+| 6 | Endpoint pose matching | 1.3 | beam | planned |
+| 7 | L-tube navigation | 3.1 | beam | planned |
+| 8 | Inverted-T navigation | 3.2 | beam | planned |
+| 9 | Single helix | 1.6 | rod | pending rod support |
+| 10 | Near-buckling control | 1.x | beam or rod | planned |
 
-Tasks 1–7 can be run with the current beam pipeline.
-Tasks 8–10 require rod support (TODO item 1).
+Tasks 1–8 use the beam pipeline. Tasks 9–10 require rod support.
 
 ---
 
@@ -451,13 +469,11 @@ Tasks 8–10 require rod support (TODO item 1).
 
 These are released for the community but do not drive the main scientific claim.
 
-- Peg-assisted U-shape (B4)
-- Two-obstacle S-shape (B3)
-- Twist-controlled rod shape (A5)
-- Channel-following task
-- Obstacle routing task
-- Self-intersection target
-- Snap-through / post-buckling task
+- Peg-assisted U-shape (2.5)
+- Two-obstacle S-shape (2.3)
+- Narrow-slot insertion (2.4)
+- Twist-controlled rod shape (1.5)
+- Multi-turn helix beyond stability (1.6 infeasible)
 
 ---
 
@@ -466,7 +482,7 @@ These are released for the community but do not drive the main scientific claim.
 For each (task, model, observation_mode) combination:
 
 1. Initialize the same beam/rod state.
-2. Provide the same task prompt and observation.
+2. Provide the same task prompt and observation (including wall description).
 3. Ask the LLM for the next control action.
 4. Parse action via tool schema (never free JSON).
 5. Run the physics simulator to new equilibrium.
@@ -482,27 +498,37 @@ The LLM's own convergence judgment is recorded as a separate measured quantity.
 
 # 12. Output Data Schema
 
-Each rollout produces one record per step:
+Each rollout produces one JSON file. Top-level fields:
 
 ```json
 {
   "task_name": "",
   "model_name": "",
   "observation_mode": "",
-  "step": 0,
-  "raw_response": "",
-  "parsed_control": {},
-  "loss": 0.0,
-  "accuracy": 0.0,
-  "descriptors": {},
-  "llm_converged": false,
-  "det_converged": false,
-  "invalid_action": false
+  "physics_type": "beam",
+  "nv": 0,
+  "rod_length": 0.0,
+  "EI": 0.0,
+  "EA": 0.0,
+  "friction": true,
+  "walls": [{"P0": [], "P1": []}],
+  "all_configurations": {},
+  "iteration_log": [
+    {
+      "step": 0,
+      "bc_issued": {"x0": 0.0, "y0": 0.0, "theta": 0.0},
+      "llm_reasoning": "",
+      "llm_converged": false,
+      "error_percent": 0.0,
+      "contact_summary": ""
+    }
+  ]
 }
 ```
 
 `llm_converged` — the LLM's own convergence judgment (measured, not authoritative).
-`det_converged` — the deterministic evaluator's judgment (controls termination).
+`error_percent` — the deterministic evaluator's loss for this step.
+`walls` — user-facing `{P0, P1}` format only; derived fields (`n`, `d`) are not stored.
 
 ---
 

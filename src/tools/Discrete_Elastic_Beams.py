@@ -1,8 +1,16 @@
+import warnings
+
 import numpy as np
 import matplotlib.pyplot as plt
 
+from src.tools.walls import penetrated_2d, plot_walls_2d
 
-# Helper function
+
+# ---------------------------------------------------------------------------
+# PHYSICS PRIMITIVES — bending and stretching gradients / Hessians
+# Do not modify: validated against finite-difference tests (test_beam_FDM.py).
+# ---------------------------------------------------------------------------
+
 def crossMat(a):
     """
     Returns the cross product matrix of vector 'a'.
@@ -267,7 +275,10 @@ def hessEs(xk, yk, xkp1, ykp1, l_k, EA):
 
     return J
 
-# Functions to create elastic force vector and its Hessian
+# ---------------------------------------------------------------------------
+# ELASTIC FORCE ASSEMBLY
+# ---------------------------------------------------------------------------
+
 def getFs(q, EA, deltaL):
   # q - DOF vector of size N
   # EA - stretching stiffness
@@ -329,6 +340,10 @@ def getFb(q, EI, deltaL):
 
   return Fb, Jb
 
+# ---------------------------------------------------------------------------
+# NEWTON SOLVER
+# ---------------------------------------------------------------------------
+
 def objfun(q_old, u_old, dt, tol, maximum_iter,
            m, mMat, # inertia
            EI, EA, # elastic stiffness
@@ -389,6 +404,164 @@ def objfun(q_old, u_old, dt, tol, maximum_iter,
 
   reactionForce = f
   return q_new, reactionForce, flag
+
+# ---------------------------------------------------------------------------
+# WALL CONTACT
+#
+# Contact state is stored as two integer arrays (per node):
+#   cx[i]  index of the vertical   wall constraining node i's x-DOF, -1 = free
+#   cy[i]  index of the horizontal wall constraining node i's y-DOF, -1 = free
+#
+# A corner node in contact with both a floor and a side wall has cx[i] >= 0
+# and cy[i] >= 0 simultaneously — both DOFs are pinned to their respective
+# wall surfaces and friction does nothing.
+# ---------------------------------------------------------------------------
+
+
+
+def _update_contacts(
+    cx:              np.ndarray,
+    cy:              np.ndarray,
+    q_pred:          np.ndarray,
+    reaction_force:  np.ndarray,
+    walls:           list,
+    controlled_set:  set,
+) -> None:
+    """
+    Update cx/cy contact state in-place for one predictor step.
+
+    Order: release stale contacts first, then detect new ones — skipping
+    any wall that was active before this call to prevent immediate re-contact
+    after release (the predictor pins those nodes on the wall surface, so
+    the penetration check could fire spuriously due to floating-point noise).
+
+    Release condition: the wall's reaction component along its own normal
+    has gone non-positive — the elastic force is pulling the node away.
+
+    Degenerate geometry warning: a node penetrating two walls of the same
+    orientation (two floors, two side walls) is physically impossible in a
+    consistent geometry; the second contact is ignored.
+    """
+
+    nv = len(cx)
+
+    for i in range(nv):
+        if i in controlled_set:
+            continue
+
+        old_cx = int(cx[i])
+        old_cy = int(cy[i])
+
+        # --- Release ---
+        if old_cx >= 0:
+            nx = walls[old_cx]["n"][0]
+            if reaction_force[2*i] * nx <= 0:
+                cx[i] = -1
+        if old_cy >= 0:
+            ny = walls[old_cy]["n"][1]
+            if reaction_force[2*i + 1] * ny <= 0:
+                cy[i] = -1
+
+        # --- New contact (skip walls active before this call) ---
+        px, py = float(q_pred[2*i]), float(q_pred[2*i + 1])
+        for j, wall in enumerate(walls):
+            if j == old_cx or j == old_cy:
+                continue
+            if not penetrated_2d(px, py, wall):
+                continue
+            n = wall["n"]
+            if abs(n[1]) >= abs(n[0]):                     # horizontal → constrains y
+                if cy[i] >= 0:
+                    warnings.warn(
+                        f"Node {i} contacts two horizontal walls (walls {cy[i]} and {j}); "
+                        f"wall {j} ignored. Check wall geometry.",
+                        stacklevel=2,
+                    )
+                else:
+                    cy[i] = j
+            else:                                           # vertical → constrains x
+                if cx[i] >= 0:
+                    warnings.warn(
+                        f"Node {i} contacts two vertical walls (walls {cx[i]} and {j}); "
+                        f"wall {j} ignored. Check wall geometry.",
+                        stacklevel=2,
+                    )
+                else:
+                    cx[i] = j
+
+
+def _build_fixed_index(
+    cx:             np.ndarray,
+    cy:             np.ndarray,
+    q_pred:         np.ndarray,
+    q0:             np.ndarray,
+    walls:          list,
+    friction:       bool,
+    controlled_set: set,
+    all_DOFs:       np.ndarray,
+) -> tuple:
+    """
+    Pin q0 for all active contacts and return the (fixed_index, free_index) partition.
+
+    For each node in contact:
+      cx[i] >= 0  →  x-DOF pinned to walls[cx[i]] surface position
+      cy[i] >= 0  →  y-DOF pinned to walls[cy[i]] surface position
+      corner       →  both DOFs wall-pinned; friction does nothing
+      single wall  →  friction freezes the tangential DOF at the predictor value
+    """
+    nv = len(cx)
+
+    # controlled DOFs are fixed every step; wall-contact DOFs are added dynamically below.
+    fixed_index = [dof for node in controlled_set for dof in (2*node, 2*node + 1)]
+
+    for i in range(nv):
+        if i in controlled_set:
+            continue
+        if cx[i] < 0 and cy[i] < 0:
+            continue
+
+        if cx[i] >= 0:                                     # vertical wall — pin x
+            n, d = walls[cx[i]]["n"], walls[cx[i]]["d"]
+            q0[2*i] = d / n[0]
+            fixed_index.append(2*i)
+        if cy[i] >= 0:                                     # horizontal wall — pin y
+            n, d = walls[cy[i]]["n"], walls[cy[i]]["d"]
+            q0[2*i + 1] = d / n[1]
+            fixed_index.append(2*i + 1)
+
+        
+        #--------------------------------------------------------------------------------
+        # FRICTION: Assume perfect sticky friction.
+        # If friction is true, go node by node and check if x coordinate (cx[i]>0) or y (cy[i]>0) is fixed.
+        # If one DOF is fixed but the other is not, set the other DOF to the predicted value.
+        # A nuance is this: if a node has both x and y DOFs fixed, we do not want to override the fixed DOF value.
+        # That is why, we handle only cases where only one DOF is fixed, and we skip the case where both DOFs are fixed (corner contact).
+        #--------------------------------------------------------------------------------
+        if friction:
+            # There is room for improvement here. Instead of fixing the DOF to q_pred (which just pushes the node to the ground),
+            # we could compute the crossing point between the vector (q0 to q_pred) and the wall plane, and fix the DOF to that crossing point.
+            # This would be more accurate and is worth doing it if we see convergence issues at the wall.
+            if cy[i] >= 0 and cx[i] < 0:                  # x is tangential — freeze it
+                q0[2*i] = q_pred[2*i]
+                fixed_index.append(2*i)
+            if cx[i] >= 0 and cy[i] < 0:                  # y is tangential — freeze it
+                q0[2*i + 1] = q_pred[2*i + 1]
+                fixed_index.append(2*i + 1)
+
+    fixed_index = np.array(fixed_index)
+    free_index  = np.setdiff1d(all_DOFs, fixed_index)
+    return fixed_index, free_index, q0
+
+
+# ---------------------------------------------------------------------------
+# VISUALIZATION
+# ---------------------------------------------------------------------------
+
+
+
+# ---------------------------------------------------------------------------
+# BOUNDARY CONDITION INTERPOLATION
+# ---------------------------------------------------------------------------
 
 def getControlNodes(
   ctime: float,
@@ -454,6 +627,10 @@ def getControlNodes(
   return np.array([x0, y0, x1, y1])
 
 
+# ---------------------------------------------------------------------------
+# MAIN SOLVER
+# ---------------------------------------------------------------------------
+
 def discreteBeam(
   physical_system: dict,
   q0: list = None,
@@ -464,7 +641,8 @@ def discreteBeam(
   dt: float = 0.01,
   totalTime: float = None,
   plotImage: int = 0,
-  plotStep: int = 5) -> dict:
+  plotStep: int = 5,
+  save_stride: int = 1) -> dict:
 
   """
   Discrete elastic beam simulator.
@@ -513,14 +691,21 @@ def discreteBeam(
   plotStep : int
       Plot every this many time steps (only used when plotImage = 1).
 
+  save_stride : int
+      Save every Kth physics step to q_history (default 1 = every step).
+      The final step is always included regardless of stride.
+
   Returns
   -------
   dict
-      status  : "success" or "failed_convergence"
-      message : human-readable outcome string
-      q_new   : list[float] — final DOF vector, length 2*nv
-      u_new   : list[float] — final velocity vector, length 2*nv
-      ctime   : float       — cumulative simulation time reached
+      status    : "success" or "failed_convergence"
+      message   : human-readable outcome string
+      q_new     : list[float] — final DOF vector, length 2*nv
+      u_new     : list[float] — final velocity vector, length 2*nv
+      ctime     : float       — cumulative simulation time reached
+      q_history : list[list[float]] — intermediate DOF snapshots at every
+                  save_stride-th step, always ending with the final state.
+                  Empty list on failed_convergence.
   """
 
   # Unpack physical system
@@ -529,7 +714,7 @@ def discreteBeam(
   EA         = physical_system.EA
   deltaL     = physical_system.deltaL
   rod_length = physical_system.rod_length
-  wall_H     = physical_system.wall_H
+  walls      = physical_system.walls
   friction   = physical_system.friction
 
   m    = np.array(physical_system.m)
@@ -571,18 +756,50 @@ def discreteBeam(
 
     totalTime = max(t_pos, t_angle, dt)   # floor at one time step
 
-  all_DOFs    = np.arange(ndof)
-  fixed_index = np.array([0, 1, 2, 3])           # controlled nodes 0 and 1 are always fixed
+  all_DOFs = np.arange(ndof)
+
+  # Which nodes are position-controlled.  Logic lives in make_physical_system();
+  # see that function for the rationale behind the current hardcoded choices.
+  controlled_nodes = physical_system.controlled_nodes
+
+  # Compatibility check: reject if any free initial node already penetrates a wall.
+  if walls:
+    controlled_set = set(controlled_nodes)
+    for i in range(nv):
+      if i in controlled_set:
+        continue
+      px, py = float(q0[2*i]), float(q0[2*i + 1])
+      for wall in walls:
+        if penetrated_2d(px, py, wall):
+          raise ValueError(
+            f"Node {i} at ({px:.4f}, {py:.4f}) already penetrates a wall "
+            f"(n={wall['n']}, d={wall['d']:.4f}) in the initial configuration. "
+            "Adjust q0 or wall positions before calling discreteBeam."
+          )
+
+  fixed_index = np.array([dof for node in controlled_nodes for dof in (2*node, 2*node + 1)])
   free_index  = np.setdiff1d(all_DOFs, fixed_index)
 
   initial_controlled_nodes = q0[0:4].copy()
 
-  # Wall contact state: one flag per node; nodes 0 and 1 are never set by wall logic
-  is_wall_contact = np.zeros(nv, dtype=bool)
+  # Wall contact state (see WALL CONTACT section for semantics).
+  # cx[i]: index of vertical wall pinning node i's x-DOF, -1 = free.
+  # cy[i]: index of horizontal wall pinning node i's y-DOF, -1 = free.
+  cx = np.full(nv, -1, dtype=int)
+  cy = np.full(nv, -1, dtype=int)
 
-  Nsteps = round(totalTime / dt)
-  ctime  = t_start          # cumulative time (for display / chaining)
-  q_new  = q0.copy()        # safe default if Nsteps < 2
+  Nsteps    = round(totalTime / dt)
+  ctime     = t_start          # cumulative time (for display / chaining)
+  q_new     = q0.copy()        # safe default if Nsteps < 2
+  q_history = []               # intermediate snapshots written to state
+
+  # Show ~30 frames per LLM decision regardless of how many physics steps are taken.
+  # plotStep=5 (the old default) is fine for a 150-step run but produces 2000 pause()
+  # calls on a 10 000-step run, which blocks the process for 20+ seconds.
+  if plotImage:
+    plotStep = max(1, Nsteps // 30)
+    # Note: the plot block below also fires on timeStep == Nsteps so we always
+    # render at least one frame even when Nsteps < plotStep (e.g. Nsteps=1).
 
   # Loop over the time steps
   for timeStep in range(1, Nsteps + 1):
@@ -595,62 +812,57 @@ def discreteBeam(
                               initial_controlled_nodes, totalTime, deltaL)
     q0[0:4] = BC_DOFs
 
-    # ------------------------------------------------------------------
-    # Predictor step — solve with current fixed_index
-    # ------------------------------------------------------------------
-    q_pred, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
-                                         m, mMat, EI, EA, W, C,
-                                         deltaL, free_index)
-    if flag < 0:
-      return {
-        "status":  "failed_convergence",
-        "message": f"Predictor did not converge at step {timeStep} (t = {ctime:.4f} s).",
-        "q_new":   q0.tolist(),
-        "u_new":   u0.tolist(),
-        "ctime":   ctime,
-      }
+    if walls:
+      # ----------------------------------------------------------------
+      # Predictor — solve with current fixed_index
+      # ----------------------------------------------------------------
+      q_pred, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
+                                           m, mMat, EI, EA, W, C,
+                                           deltaL, free_index)
+      if flag < 0:
+        return {
+          "status":  "failed_convergence",
+          "message": f"Predictor did not converge at step {timeStep} (t = {ctime:.4f} s).",
+          "q_new":   q0.tolist(),
+          "u_new":   u0.tolist(),
+          "ctime":   ctime,
+        }
 
-    # ------------------------------------------------------------------
-    # Update wall contact flags (checks 1 and 2 independently on predictor)
-    # ------------------------------------------------------------------
-    for i in range(2, nv):  # nodes 0 and 1 are never subject to wall logic
-      # Check 1: free node penetrates wall -> add contact
-      if not is_wall_contact[i] and q_pred[2*i+1] <= wall_H:
-        is_wall_contact[i] = True
-      # Check 2: already-contact node has wrong-sign reaction -> release.
-      # Must be elif: reactionForce at a newly-contacted node is ~0 (it was
-      # free in the predictor), which would incorrectly trigger release.
-      elif is_wall_contact[i] and reactionForce[2*i+1] <= 0:
-        is_wall_contact[i] = False
+      # Update contact state, pin q0, rebuild fixed/free partition
+      _update_contacts(cx, cy, q_pred, reactionForce, walls, physical_system.controlled_set)
+      fixed_index, free_index, q0 = _build_fixed_index(
+          cx, cy, q_pred, q0, walls, friction, physical_system.controlled_set, all_DOFs)
 
-    # ------------------------------------------------------------------
-    # Rebuild fixed_index / free_index and enforce wall constraints on q0
-    # ------------------------------------------------------------------
-    fixed_index = [0, 1, 2, 3]  # nodes 0 and 1 always fixed
-    for i in range(2, nv):
-      if is_wall_contact[i]:
-        q0[2*i+1] = wall_H          # y always pinned at wall surface
-        fixed_index.append(2*i+1)
-        if friction:
-          q0[2*i] = q_pred[2*i]     # x frozen only with friction
-          fixed_index.append(2*i)
-    fixed_index = np.array(fixed_index)
-    free_index  = np.setdiff1d(all_DOFs, fixed_index)
+      # ----------------------------------------------------------------
+      # Corrector — solve with updated fixed_index
+      # ----------------------------------------------------------------
+      q_new, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
+                                          m, mMat, EI, EA, W, C,
+                                          deltaL, free_index)
+      if flag < 0:
+        return {
+          "status":  "failed_convergence",
+          "message": f"Corrector did not converge at step {timeStep} (t = {ctime:.4f} s).",
+          "q_new":   q0.tolist(),
+          "u_new":   u0.tolist(),
+          "ctime":   ctime,
+        }
 
-    # ------------------------------------------------------------------
-    # Corrector step — solve with updated fixed_index
-    # ------------------------------------------------------------------
-    q_new, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
-                                        m, mMat, EI, EA, W, C,
-                                        deltaL, free_index)
-    if flag < 0:
-      return {
-        "status":  "failed_convergence",
-        "message": f"Corrector did not converge at step {timeStep} (t = {ctime:.4f} s).",
-        "q_new":   q0.tolist(),
-        "u_new":   u0.tolist(),
-        "ctime":   ctime,
-      }
+    else:
+      # ----------------------------------------------------------------
+      # No walls — single solve, fixed partition never changes
+      # ----------------------------------------------------------------
+      q_new, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
+                                          m, mMat, EI, EA, W, C,
+                                          deltaL, free_index)
+      if flag < 0:
+        return {
+          "status":  "failed_convergence",
+          "message": f"Solve did not converge at step {timeStep} (t = {ctime:.4f} s).",
+          "q_new":   q0.tolist(),
+          "u_new":   u0.tolist(),
+          "ctime":   ctime,
+        }
 
     u_new = (q_new - q0) / dt
     ctime += dt
@@ -658,45 +870,132 @@ def discreteBeam(
     q0 = q_new.copy()
     u0 = u_new.copy()
 
-    # Plot
-    if plotImage and timeStep % plotStep == 0:
-      x_arr = q_new[::2] # q[0], q[2], q[4]
-      y_arr = q_new[1::2] # q[1], q[3], q[5]
+    # Save snapshot: every save_stride-th step; final step always included.
+    if timeStep % save_stride == 0 or timeStep == Nsteps:
+      q_history.append(q_new.tolist())
 
-      h1 = plt.figure(1)
-      plt.clf() # Clear current figure
-      plt.plot(x_arr, y_arr, 'ko-')
-      plt.axhline(y=physical_system.wall_H, color='r', linestyle='--', linewidth=1)
-      plt.title(f't={ctime:.4f}s')
-      plt.xlabel('x')
-      plt.ylabel('y')
-      plt.axis('equal')
-      plt.show(block=False)
+    # Catch silent divergence: NaN/Inf in q means the integrator produced
+    # a mathematically nonsensical state that would crash the plotter and
+    # corrupt every subsequent step.  Bail out now rather than propagate garbage.
+    if not np.isfinite(q_new).all():
+      return {
+        "status":  "failed_convergence",
+        "message": f"Simulation diverged at t={ctime:.4f} s (NaN/Inf in q).",
+        "q_new":   q0.tolist(),
+        "u_new":   u0.tolist(),
+        "ctime":   ctime,
+      }
+
+    # Plot — fire on stride OR on the final step so at least one frame always renders.
+    if plotImage and (timeStep % plotStep == 0 or timeStep == Nsteps):
+      first_frame = not plt.fignum_exists(1)
+      plt.figure(1)
+      plt.clf()
+      ax = plt.gca()
+      ax.plot(q_new[::2], q_new[1::2], 'ko-')
+      plot_walls_2d(ax, walls)
+      ax.set_title(f't={ctime:.4f}s')
+      ax.set_xlabel('x')
+      ax.set_ylabel('y')
+      margin = rod_length * 0.4
+      x_arr, y_arr = q_new[::2], q_new[1::2]
+      ax.set_xlim(x_arr.min() - margin, x_arr.max() + margin)
+      ax.set_ylim(y_arr.min() - margin, y_arr.max() + margin)
+      ax.set_aspect('equal')
+      if first_frame:
+        plt.show(block=False)   # register window with event loop; non-blocking on exit
       plt.pause(0.01)
 
   return {
-    "status":  "success",
-    "message": f"Simulation completed {Nsteps - 1} steps to t = {ctime:.4f} s.",
+    "status":    "success",
+    "message":   f"Simulation completed {Nsteps - 1} steps to t = {ctime:.4f} s.",
+    "q_history": q_history,
     "q_new":   q_new.tolist(),
     "u_new":   u0.tolist(),
     "ctime":   ctime,
   }
 
 #
-# Run it from the project root: python -m src.tools.Discrete_Elastic_Beams
+# Run from the project root:
+#   python -m src.tools.Discrete_Elastic_Beams
+# Change CASE below to select the test scenario.
+#
+#   CASE 1 — no wall
+#   CASE 2 — infinite horizontal floor at y = -0.12 m
+#   CASE 3 — floor + finite raised platform
+#   CASE 4 — horizontal tube (floor + ceiling)
+#
+# Wall format: {"P0": [x0,y0], "P1": [x1,y1]}
+#   Outward normal = (P1-P0) rotated 90° CCW.
+#   Use large sentinels (±10) to approximate an infinite wall.
 #
 if __name__ == "__main__":
+  import types
   import src.core.config as config
   from src.models.physical_system import make_physical_system
 
-  ps     = make_physical_system(config)
+  CASE = 4   # ← change to 1, 2, 3, or 4
+
+  # -------------------------------------------------------------------------
+  # Per-case parameters
+  # -------------------------------------------------------------------------
+  if CASE == 1:
+    walls          = []
+    ctrl_position  = (0.03, -0.05)
+    ctrl_angle     = 0.5
+    label          = "Case 1: no wall"
+
+  elif CASE == 2:
+    # Traverse left → right: edge=(+1,0) → n=(0,+1) pointing up (floor)
+    walls          = [{"P0": [-10, -0.12], "P1": [10, -0.12]}]
+    ctrl_position  = (0.0, -0.07)
+    ctrl_angle     = 0.0
+    label          = "Case 2: infinite horizontal floor at y = -0.12 m"
+
+  elif CASE == 3:
+    walls = [
+      {"P0": [-10, -0.15], "P1": [10,    -0.15]},   # floor
+      {"P0": [-0.01, -0.12], "P1": [0.015, -0.12]},   # finite raised platform
+    ]
+    ctrl_position  = (0.03, -0.08)
+    ctrl_angle     = 0.1
+    label          = "Case 3: floor + finite raised platform"
+
+  elif CASE == 4:
+    # L-shaped tube: beam enters from the top, bends into the horizontal channel.
+    # Vertical channel : x ∈ [-0.01, +0.01],  y ∈ [-0.10, +0.02]
+    # Horizontal channel: x ∈ [-0.01, +0.12], y ∈ [-0.12, -0.10]
+    # Five segments close the boundary; top entrance is open.
+    # Winding is CCW so each outward normal points into the tube interior.
+    walls = [
+      {"P0": [-0.01,  0.02], "P1": [-0.01, -0.12]},  # left wall       n=[+1,  0]
+      {"P0": [-0.01, -0.12], "P1": [ 0.12, -0.12]},  # bottom          n=[ 0, +1]
+      {"P0": [ 0.12, -0.12], "P1": [ 0.12, -0.10]},  # right end cap   n=[-1,  0]
+      {"P0": [ 0.12, -0.10], "P1": [ 0.01, -0.10]},  # top of horiz.   n=[ 0, -1]
+      {"P0": [ 0.01, -0.10], "P1": [ 0.01,  0.02]},  # right of vert.  n=[-1,  0]
+    ]
+    ctrl_position  = (0.0, -0.06)
+    ctrl_angle     = 0.0
+    label          = "Case 4: L-shaped tube"
+
+  else:
+    raise ValueError(f"Unknown CASE {CASE}")
+
+  # Build physical system with the chosen walls
+  cfg = types.SimpleNamespace(**{k: getattr(config, k) for k in dir(config) if not k.startswith('_')})
+  cfg.WALLS = walls
+
+  ps     = make_physical_system(cfg)
   result = discreteBeam(
     physical_system  = ps,
-    control_position = (0.0, -0.07),
-    control_angle    = 0.0,
-    plotImage        = config.PLOT_IMAGE,
+    control_position = ctrl_position,
+    control_angle    = ctrl_angle,
+    plotImage        = 1,
+    plotStep         = 1,
+    dt               = config.DT,
   )
 
+  print(f"\n{label}")
   print(f"Status:  {result['status']}")
   print(f"Message: {result['message']}")
   if result["status"] == "success":

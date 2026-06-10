@@ -2,32 +2,16 @@
 U-shape benchmark: deep semicircular bend, total turning angle ≈ π.
 
 Run standalone:
-    python -m src.benchmarks.shapes.beam_U
+    python -m src.benchmarks.cases.beam_U
 """
 
 import numpy as np
 
 from src.benchmarks import BenchmarkCase, register
-from src.benchmarks.losses import build_ideal_from_edge_profile, profile_loss
+from src.benchmarks.profile_fitting import build_ideal_from_edge_profile, profile_loss
+from src.benchmarks.shapes.profile_U import profile_u, fit_u
 from src.visualization.run_time_visual import plot_shape, plot_comparison
 
-
-# ---------------------------------------------------------------------------
-# THETA PROFILE + FIT  (linear ramp to ±π = semicircle)
-# ---------------------------------------------------------------------------
-
-def _profile_u(s_norm: np.ndarray, total_turn: float = np.pi) -> np.ndarray:
-    return total_turn * s_norm
-
-
-def _fit_u(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
-    sign = float(np.sign(dtheta[-1])) if len(dtheta) > 0 else 1.0
-    return {"total_turn": (sign or 1.0) * np.pi}
-
-
-# ---------------------------------------------------------------------------
-# CASE
-# ---------------------------------------------------------------------------
 
 class UShape(BenchmarkCase):
     name               = "U"
@@ -42,12 +26,12 @@ class UShape(BenchmarkCase):
     def reference_fn(self, x0: float = 0.0, y0: float = 0.0, theta: float = 0.0) -> list:
         """Semicircle anchored at (x0, y0) with initial slope theta."""
         return build_ideal_from_edge_profile(
-            _profile_u, n=9, arc_length=0.10,
+            profile_u, n=9, arc_length=0.10,
             x0=x0, y0=y0, theta=theta, total_turn=np.pi,
         )
 
     def loss_fn(self, nodes: list, ps=None, q_ref=None) -> dict:
-        return profile_loss(nodes, _profile_u, _fit_u)
+        return profile_loss(nodes, profile_u, fit_u)
 
 
 register(UShape())

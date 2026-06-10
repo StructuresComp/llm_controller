@@ -10,11 +10,19 @@ import math
 import matplotlib.pyplot as plt
 
 
+def _draw_walls(ax, walls: list) -> None:
+    """Draw all walls on axes ax."""
+    for w in walls:
+        P0, P1 = w["P0"], w["P1"]
+        ax.plot([P0[0], P1[0]], [P0[1], P1[1]],
+                color="gray", linewidth=1.5, linestyle="--")
+
+
 def plot_shape(
     nodes: list,
     name: str = "",
     error_percent: float = 0.0,
-    wall_H: float = None,
+    walls: list = None,
     ax=None,
     show: bool = True,
 ) -> None:
@@ -29,9 +37,8 @@ def plot_shape(
     ax.plot(xs[0],  ys[0],  "gs", markersize=10, label="node 0 (held)")
     ax.plot(xs[-1], ys[-1], "r^", markersize=10, label="tip")
 
-    if wall_H is not None:
-        ax.axhline(wall_H, color="gray", linewidth=1.5, linestyle="--",
-                   label=f"wall y={wall_H:.3f}")
+    if walls:
+        _draw_walls(ax, walls)
 
     ax.set_aspect("equal")
     ax.invert_yaxis()
@@ -50,7 +57,7 @@ def plot_comparison(
     actual_nodes: list,
     result: dict,
     name: str = "",
-    wall_H: float = None,
+    walls: list = None,
     axes=None,
     show: bool = True,
 ) -> None:
@@ -73,9 +80,8 @@ def plot_comparison(
     axes.plot(bx[0],  by[0],  "gs", markersize=10)
     axes.plot(bx[-1], by[-1], "r^", markersize=10)
 
-    if wall_H is not None:
-        axes.axhline(wall_H, color="gray", linewidth=1.5, linestyle="--",
-                     label=f"wall y={wall_H:.3f}")
+    if walls:
+        _draw_walls(axes, walls)
 
     err   = result.get("error_percent", float("nan"))
     diag  = result.get("diagnostics", "")
@@ -105,6 +111,11 @@ def plot_grid(benchmarks: list, n_cols: int = 2, show: bool = True) -> None:
 
     for i, bm in enumerate(benchmarks):
         nodes = bm.reference_fn()
+        if nodes is None:
+            axes_flat[i].text(0.5, 0.5, f"{bm.name}\n(no reference shape)",
+                              ha="center", va="center", transform=axes_flat[i].transAxes)
+            axes_flat[i].set_title(bm.name)
+            continue
         plot_shape(nodes, name=bm.name, error_percent=0.0, ax=axes_flat[i], show=False)
 
     for j in range(n, len(axes_flat)):

@@ -22,19 +22,19 @@ def register(case: BenchmarkCase) -> None:
 
 def _discover() -> None:
     """
-    Import every *.py file in shapes/ to trigger their register() calls.
-    Runs once; skips modules already in sys.modules (handles running a shape
+    Import every *.py file in cases/ to trigger their register() calls.
+    Runs once; skips modules already in sys.modules (handles running a case
     file directly as __main__ via python -m).
     """
     global _discovered
     if _discovered:
         return
     _discovered = True
-    shapes_dir = Path(__file__).parent / "shapes"
-    for path in sorted(shapes_dir.glob("*.py")):
+    cases_dir = Path(__file__).parent / "cases"
+    for path in sorted(cases_dir.glob("*.py")):
         if path.name == "__init__.py":
             continue
-        module_name = f"src.benchmarks.shapes.{path.stem}"
+        module_name = f"src.benchmarks.cases.{path.stem}"
         if module_name not in sys.modules:
             importlib.import_module(module_name)
 

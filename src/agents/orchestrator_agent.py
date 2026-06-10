@@ -19,6 +19,7 @@
 from langgraph.graph import END, StateGraph
 
 from src.core import config
+from src.core.observation import describe_walls, describe_nodes, describe_history
 from src.llm.llm import call_llm, call_llm_with_tool
 from src.models.state_llm_control import ControllerState
 
@@ -98,7 +99,7 @@ PHYSICAL SYSTEM:
 - Elastic beam (length L = {rod_length:.4f} m, stiffness EI = {EI:.6e})
 - One end: CLAMPED and held by the arm (node 0). YOU CONTROL THIS END.
 - Other end: FREE. Hangs under gravity. Can contact the wall.
-- Rigid wall at y = {wall_H:.4f} m — the beam cannot penetrate it.
+- Rigid wall(s): {wall_description}
 
 YOUR CONTROL INPUTS (arm degrees of freedom):
 - Position (x0, y0): where you hold node 0 (the clamped end)
@@ -131,7 +132,7 @@ _DECISION_PROMPT = """\
 ROBOTIC ARM CONTROL TASK:
 
 YOU CONTROL: Clamped end (node 0) position (x0, y0) and angle (theta, in radians).
-GOAL: Bend the free end of the beam against the wall at y = {wall_H:.4f} m to achieve a {target_shape} shape.
+GOAL: Bend the free end of the beam against the wall ({wall_description}) to achieve a {target_shape} shape.
 BEAM PROPERTIES: Length L = {rod_length:.4f} m, Stiffness EI = {EI:.6e}.
 
 ANGLE CONVENTION (θ counter-clockwise from -Y axis):
@@ -140,6 +141,7 @@ ANGLE CONVENTION (θ counter-clockwise from -Y axis):
   θ = -π/2:  pointing left [-1,  0]
 
 {plan_section}\
+{error_section}\
 RECENT ARM MOVES ({k} most recent):
 {history_section}
 CURRENT BEAM STATE:
@@ -161,69 +163,6 @@ Strategy: Move gradually. The beam resists bending (high EI). Incremental change
 # 4. HELPERS
 # ---------------------------------------------------------------------------
 
-import numpy as np
-
-
-def _compute_descriptors(observable_positions: list) -> dict:
-    """
-    Compute geometric descriptors from observable node positions.
-
-    Returns dict with:
-      tangent_angles: list of angles (radians) at each observable node
-      curvature_signs: list of +1, 0, -1 for each interior observable node
-      total_turning_angle: total signed rotation from first to last node
-    """
-    if len(observable_positions) < 2:
-        return {}
-
-    # Convert to numpy for easier computation
-    obs = np.array(observable_positions)
-
-    # Tangent angles at each node (CCW from -Y axis)
-    # Edge from node i to node i+1 has direction atan2(dx, -dy)
-    tangents = []
-    for i in range(len(obs) - 1):
-        dx = obs[i+1][0] - obs[i][0]
-        dy = obs[i+1][1] - obs[i][1]
-        angle = np.arctan2(dx, -dy)  # CCW from -Y axis
-        tangents.append(float(angle))
-
-    # Curvature signs: sign of change in tangent angle
-    curvature_signs = []
-    for i in range(len(tangents) - 1):
-        dangle = tangents[i+1] - tangents[i]
-        # Wrap to [-pi, pi]
-        while dangle > np.pi:
-            dangle -= 2 * np.pi
-        while dangle < -np.pi:
-            dangle += 2 * np.pi
-        sign = 1 if dangle > 1e-6 else (-1 if dangle < -1e-6 else 0)
-        curvature_signs.append(sign)
-
-    # Total turning angle
-    total_turning = tangents[-1] - tangents[0]
-    while total_turning > np.pi:
-        total_turning -= 2 * np.pi
-    while total_turning < -np.pi:
-        total_turning += 2 * np.pi
-
-    return {
-        "tangent_angles":    tangents,
-        "curvature_signs":   curvature_signs,
-        "total_turning":     float(total_turning),
-    }
-
-
-def _format_descriptors(descriptors: dict, indent: str = "  ") -> str:
-    """Format geometric descriptors as human-readable text."""
-    if not descriptors:
-        return ""
-    lines = [f"{indent}Tangent angles: {[f'{a:.3f}' for a in descriptors['tangent_angles']]}"]
-    lines.append(f"{indent}Curvature signs: {descriptors['curvature_signs']}")
-    lines.append(f"{indent}Total turning: {descriptors['total_turning']:.4f} rad")
-    return "\n".join(lines)
-
-
 def _format_plan_section(plan: str) -> str:
     """Prepend the plan to the decision prompt if one exists."""
     if not plan:
@@ -231,43 +170,8 @@ def _format_plan_section(plan: str) -> str:
     return f"Strategy:\n{plan}\n\n"
 
 
-def _format_history(bc_history: list, shape_history: list) -> str:
-    """Format rolling BC + shape history for the decision prompt."""
-    if not bc_history:
-        return "  (no history yet)\n"
-    lines = []
-    for i, (bc, shape) in enumerate(zip(bc_history, shape_history)):
-        x0, y0, theta = bc
-        lines.append(f"  Step {i+1}: node0 → ({x0:.4f}, {y0:.4f}) θ={theta:.4f} rad")
-        for j, (x, y) in enumerate(shape):
-            lines.append(f"           obs[{j}]: ({x:+.6f}, {y:+.6f})")
-        # Add geometric descriptors if requested
-        if config.OBSERVATION_LEVEL in ("geometric", "full"):
-            descriptors = _compute_descriptors(shape)
-            desc_text = _format_descriptors(descriptors, indent="           ")
-            lines.append(desc_text)
-    return "\n".join(lines) + "\n"
-
-
-def _format_current(shape_history: list, bc_current: list) -> str:
-    """Format the most recent observable configuration."""
-    if not shape_history:
-        return "  (initial straight-down configuration)\n"
-    x0, y0, theta = bc_current
-    lines = [f"  BC: ({x0:.4f}, {y0:.4f}) θ={theta:.4f} rad"]
-    current_shape = shape_history[-1]
-    for j, (x, y) in enumerate(current_shape):
-        lines.append(f"  obs[{j}]: ({x:+.6f}, {y:+.6f})")
-    # Add geometric descriptors if requested
-    if config.OBSERVATION_LEVEL in ("geometric", "full"):
-        descriptors = _compute_descriptors(current_shape)
-        desc_text = _format_descriptors(descriptors, indent="  ")
-        lines.append(desc_text)
-    return "\n".join(lines) + "\n"
-
-
 def _format_eval_section(eval_result: dict) -> str:
-    """Format the geometric evaluator result for the decision prompt."""
+    """Format the deterministic evaluator result for the decision prompt."""
     if not eval_result:
         return ""
     pct = eval_result.get("error_percent", 100.0)
@@ -276,6 +180,17 @@ def _format_eval_section(eval_result: dict) -> str:
         f"GEOMETRIC SHAPE ERROR (deterministic ground truth):\n"
         f"  {pct:.1f}% error  (0% = perfect match, 100% = no match)\n"
         f"  {diag}\n\n"
+    )
+
+
+def _format_error_section(error: str) -> str:
+    """Surface a safety rejection so the LLM knows why its last BC was refused."""
+    if not error:
+        return ""
+    return (
+        f"*** PREVIOUS BC REJECTED — DO NOT REPEAT THIS MOVE ***\n"
+        f"  {error}\n"
+        f"  Adjust your values to satisfy the safe limit stated above and try again.\n\n"
     )
 
 
@@ -302,10 +217,10 @@ def planner_node(state: ControllerState) -> dict:
 
     ps = state["physical_system"]
     prompt = _PLAN_PROMPT.format(
-        wall_H       = ps.wall_H,
-        rod_length   = ps.rod_length,
-        EI           = ps.EI,
-        target_shape = state["target_shape"] or "unspecified",
+        wall_description = describe_walls(ps.walls),
+        rod_length       = ps.rod_length,
+        EI               = ps.EI,
+        target_shape     = state["target_shape"] or "unspecified",
     )
     plan = call_llm(prompt=prompt, system=_PLAN_SYSTEM)
     return {"plan": plan}
@@ -313,18 +228,29 @@ def planner_node(state: ControllerState) -> dict:
 
 def decision_node(state: ControllerState) -> dict:
     """Issue the next BC decision and assess convergence."""
-    ps = state["physical_system"]
+    ps  = state["physical_system"]
+    lvl = config.OBSERVATION_LEVEL
+
+    if state["shape_history"]:
+        current_section = describe_nodes(
+            state["shape_history"][-1], state["bc_current"], level=lvl,
+        ) + "\n"
+    else:
+        current_section = "(initial straight-down configuration)\n"
 
     prompt = _DECISION_PROMPT.format(
-        target_shape    = state["target_shape"] or "unspecified",
-        wall_H          = ps.wall_H,
-        rod_length      = ps.rod_length,
-        EI              = ps.EI,
-        k               = config.K_HISTORY,
-        plan_section    = _format_plan_section(state["plan"]),
-        history_section = _format_history(state["bc_history"], state["shape_history"]),
-        current_section = _format_current(state["shape_history"], state["bc_current"]),
-        eval_section    = _format_eval_section(state.get("eval_result", {})),
+        target_shape     = state["target_shape"] or "unspecified",
+        wall_description = describe_walls(ps.walls),
+        rod_length       = ps.rod_length,
+        EI               = ps.EI,
+        k                = config.K_HISTORY,
+        plan_section     = _format_plan_section(state["plan"]),
+        error_section    = _format_error_section(state.get("error") or ""),
+        history_section  = describe_history(
+                               state["bc_history"], state["shape_history"], level=lvl,
+                           ) + "\n",
+        current_section  = current_section,
+        eval_section     = _format_eval_section(state.get("eval_result", {})),
     )
 
     # BC decision — schema-enforced, never free JSON
@@ -345,10 +271,9 @@ def decision_node(state: ControllerState) -> dict:
     convergence = call_llm_with_tool(
         prompt = (
             f"TARGET SHAPE: {state['target_shape']}\n"
-            f"WALL: at y = {ps.wall_H:.4f} m\n"
-            f"\n"
-            f"CURRENT BEAM STATE (observable nodes shown):\n"
-            f"{_format_current(state['shape_history'], state['bc_current'])}\n"
+            f"WALL: {describe_walls(ps.walls)}\n\n"
+            f"CURRENT BEAM STATE (observable nodes):\n"
+            f"{current_section}"
             + (_format_eval_section(eval_result) if eval_result else "")
             + f"\nHas the beam been deformed into a {state['target_shape']} shape? "
             f"Judge by: curvature direction, symmetry, contact with the wall, overall shape match. "

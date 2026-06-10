@@ -6,8 +6,8 @@
 #
 # Sections (in order):
 #   1. LLM
-#   2. Simulation & Visualization
-#   3. Agent Perception & Control
+#   2. Agent Perception & Control
+#   3. Simulation & Visualization
 # ---------------------------------------------------------------------------
 
 
@@ -18,7 +18,11 @@
 # Provider can also be inferred from the model name (claude-* → anthropic,
 # gpt-/o1-/o3-/o4-* → openai, gemini-* → gemini).
 
-qwen = True  # if True, use Qwen models (only available via Ollama for now)
+LOG_LLM_CALLS = True   # True = log every prompt + response alongside the run JSON
+RUN_NAME      = ""     # stem for output files: <RUN_NAME>.json + <RUN_NAME>.log
+                       # "" = auto-generate run_<timestamp>_<pid> for each file
+
+qwen = False  # if True, use Qwen models (only available via Ollama for now)
 if qwen:
     LLM_PROVIDER = "ollama"
     MODEL        = "qwen2.5:14b"
@@ -33,14 +37,44 @@ else:
     MAX_TOKENS   = 2048   # hard upper bound on output tokens per LLM call
 
 # ===========================================================================
-# 2. SIMULATION & VISUALIZATION
+# 2. AGENT PERCEPTION & CONTROL
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# 2a. Physical parameters
+# 2a. Orchestrator observation level
+#     Controls what geometric information is sent to the orchestrator.
+#     "positions"  — raw (x, y) coordinates of observable nodes only
+#     "geometric"  — positions + tangent angles + curvature signs + total turning angle
+#     "full"       — geometric + wall contact status per node + arc length distribution
+# ---------------------------------------------------------------------------
+OBSERVATION_LEVEL = "geometric"
+
+# ---------------------------------------------------------------------------
+# 2b. Orchestrator perception & history
+# ---------------------------------------------------------------------------
+N_PARTIAL  = 5    # nodes sent to orchestrator (subsampled from full NV under "Physical parameters")
+K_HISTORY  = 5    # number of (shape, BC) pairs kept in rolling history
+
+# ---------------------------------------------------------------------------
+# 2d. Control loop
+# ---------------------------------------------------------------------------
+CHECK_SHAPE_REFLECTION = False  # if True, also test reversed traversal and take min error
+
+ORCHESTRATOR_MODE = "plan"   # "plan" (grounded) or "myopic" (reactive)
+ALLOW_REPLAN      = False    # if True, orchestrator can discard and redo the plan
+MAX_ITERATIONS    = 50       # hard stop on orchestrator → programmer cycles
+
+
+# ===========================================================================
+# 3. SIMULATION & VISUALIZATION
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 3a. Physical parameters
 #     These define the beam/DLO. Change here to try different materials or
 #     geometries. make_physical_system(config) reads these once at startup.
 # ---------------------------------------------------------------------------
+PHYSICS_TYPE = "beam"  # "beam" (2D elastic beam) | "rod" (3D elastic rod, under development)
 NV          = 21       # number of vertices (nodes); total DOFs = 2 * NV
 RHO         = 10000    # density (kg/m³)
 Y           = 1e6      # Young's modulus (Pa)
@@ -49,45 +83,41 @@ ROD_LENGTH  = 0.1      # total beam length (m)
 VISC        = 1000.0   # viscous damping coefficient (Pa·s)
 
 # ---------------------------------------------------------------------------
-# 2b. Environment
+# 3b. Environment
 # ---------------------------------------------------------------------------
-WALL_H                  = -0.12  # wall position: wall sits at y = WALL_H (m); must satisfy |WALL_H| > ROD_LENGTH
+WALLS = [{"P0": [-10, -0.12], "P1": [10, -0.12]}]
+# Each wall is a directed segment {"P0": [x0,y0], "P1": [x1,y1]}.
+# Outward normal = (P1-P0) rotated 90° CCW — traversal order sets which side is blocked.
+# Use large sentinels (±10) for walls that should span the full simulation domain.
+# Empty list = no wall.
+
+TOLERANCE_DISTANCE = 0.1 * ROD_LENGTH  # min clearance (m) the controlled nodes must keep from any wall
+                                        # safety agent flags a violation if a node comes within this distance
+                                        # 10% of rod length is a reasonable default; set to 0 to disable
+
 BOUNDARY_VELOCITY       = 0.05   # translational speed of node 0 (m/s)
 BOUNDARY_ANGLE_VELOCITY = 0.05   # rotational speed of node 0 (rad/s)
 DT                      = 0.001   # time step size for physics integration (s); smaller = more accurate but slower
-FRICTION                = True  # True = wall fixes x and y; False = wall fixes y only (frictionless)
+FRICTION                = False  # True = wall fixes x and y; False = wall fixes y only (frictionless)
 
 # ---------------------------------------------------------------------------
-# 2c. Visualization
+# 3c. Visualization
 # ---------------------------------------------------------------------------
 PLOT_IMAGE = 1   # 1 = show beam plots during simulation, 0 = suppress
 
-
-# ===========================================================================
-# 3. AGENT PERCEPTION & CONTROL
-# ===========================================================================
-
 # ---------------------------------------------------------------------------
-# 3a. Orchestrator observation level
-#     Controls what geometric information is sent to the orchestrator.
-#     "positions"  — raw (x, y) coordinates of observable nodes only
-#     "geometric"  — positions + tangent angles + curvature signs + total turning angle
-#     "full"       — geometric + wall contact status per node + arc length distribution
+# 3d. Data storage
+#     Controls how much simulation history is retained for the viewer.
+#
+#     SAVE_STRIDE  — save every Kth physics step within each LLM decision.
+#                    1 = save every step (full resolution).
+#                    N = save every Nth step (reduces data by factor N).
+#                    The final step of each decision is always saved regardless
+#                    of stride, since that is the state the LLM observes.
+#
+#     MAX_CONFIGS  — hard cap on total configurations stored in state.
+#                    If exceeded, the oldest entries are trimmed from the front
+#                    so recent history is always preserved.
 # ---------------------------------------------------------------------------
-OBSERVATION_LEVEL = "geometric"  # change to "geometric" or "full" for richer input
-
-# ---------------------------------------------------------------------------
-# 3b. Orchestrator perception & history
-# ---------------------------------------------------------------------------
-N_PARTIAL  = 5    # nodes sent to orchestrator (subsampled from full NV)
-K_HISTORY  = 5    # number of (shape, BC) pairs kept in rolling history
-
-# ---------------------------------------------------------------------------
-# 3c. Control loop
-# ---------------------------------------------------------------------------
-CHECK_SHAPE_REFLECTION = False  # if True, also test reversed traversal and take min error
-
-ORCHESTRATOR_MODE = "plan"   # "plan" (grounded) or "myopic" (reactive)
-ALLOW_REPLAN      = False    # if True, orchestrator can discard and redo the plan
-MAX_ITERATIONS    = 50       # hard stop on orchestrator → programmer cycles
-MAX_CONFIGS       = 1000     # max configurations stored in state before downsampling
+SAVE_STRIDE = 50     # save every 50th physics step per decision
+MAX_CONFIGS = 1000   # hard cap; oldest trimmed if exceeded

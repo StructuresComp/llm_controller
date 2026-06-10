@@ -2,32 +2,16 @@
 C-shape benchmark: smooth single-sided arc, constant curvature.
 
 Run standalone:
-    python -m src.benchmarks.shapes.beam_C
+    python -m src.benchmarks.cases.beam_C
 """
 
 import numpy as np
 
 from src.benchmarks import BenchmarkCase, register
-from src.benchmarks.losses import build_ideal_from_edge_profile, profile_loss
+from src.benchmarks.profile_fitting import build_ideal_from_edge_profile, profile_loss
+from src.benchmarks.shapes.profile_C import profile_c, fit_c
 from src.visualization.run_time_visual import plot_shape, plot_comparison
 
-
-# ---------------------------------------------------------------------------
-# THETA PROFILE + FIT  (linear ramp = constant curvature = circular arc)
-# ---------------------------------------------------------------------------
-
-def _profile_c(s_norm: np.ndarray, total_turn: float = 1.0) -> np.ndarray:
-    return total_turn * s_norm
-
-
-def _fit_c(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
-    denom = float(np.dot(s_norm, s_norm)) + 1e-12
-    return {"total_turn": float(np.dot(s_norm, dtheta) / denom)}
-
-
-# ---------------------------------------------------------------------------
-# CASE
-# ---------------------------------------------------------------------------
 
 class CShape(BenchmarkCase):
     name               = "C"
@@ -41,12 +25,12 @@ class CShape(BenchmarkCase):
     def reference_fn(self, x0: float = 0.0, y0: float = 0.0, theta: float = 0.0) -> list:
         """Quarter-circle arc anchored at (x0, y0) with initial slope theta."""
         return build_ideal_from_edge_profile(
-            _profile_c, n=9, arc_length=0.10,
+            profile_c, n=9, arc_length=0.10,
             x0=x0, y0=y0, theta=theta, total_turn=np.pi / 2,
         )
 
     def loss_fn(self, nodes: list, ps=None, q_ref=None) -> dict:
-        return profile_loss(nodes, _profile_c, _fit_c)
+        return profile_loss(nodes, profile_c, fit_c)
 
 
 register(CShape())
