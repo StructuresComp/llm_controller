@@ -2,6 +2,13 @@
 
 A LangGraph framework for using large language models (and future vision models) as controllers for deformable linear objects (DLOs). The LLM observes the current beam configuration, reasons about the physics, and issues boundary condition commands to steer the beam toward a target shape.
 
+Right now, it only supports beams (2D DLO). Khalid is working on the rods (3D DLOs).
+
+Recommendation for students to get up and running:
+- Follow the instructions to install it.
+- Run this case ``python3 cli.py --target C --H 0.15`` where the LLM will try to bend the DLO against a wall at ``y=-0.15`` and give it a C-shape.
+- TO visualize it, run ``python3 visualize.py`` and open ``viz/index.html`` (Click play in your browser)
+
 **Research question:** How well can LLMs (and later VLMs) perform as controllers in physical systems they cannot directly observe or manipulate?
 
 ---
@@ -48,8 +55,8 @@ pip install -r requirements.txt
 ### Run the controller
 
 ```bash
-python3 cli.py --target C                         # predefined shape
 python3 cli.py --target C --H 0.15               # shape + custom wall depth
+python3 cli.py --target C                         # predefined shape
 python3 cli.py --target tip_reach                # tip-reach benchmark
 python3 cli.py --target C --length 0.15           # override rod length
 python3 cli.py --target snake_L --config my_run.py  # custom config overlay
