@@ -77,6 +77,11 @@ def parse_args():
             "Any attribute defined there overrides the matching setting in config.py."
         ),
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print LLM prompts and responses to terminal for debugging.",
+    )
 
     return parser.parse_args()
 
@@ -159,9 +164,13 @@ def main():
     if args.config is not None:
         _apply_config_overlay(args.config)
 
+    # Apply --debug flag to config
+    if args.debug:
+        config.DEBUG = True
+
     # Downstream imports are deferred to here so the overlay is in effect before
     # any src module reads from config at import time.
-    from src.core.save_state import save_run
+    from src.core.config_writer import ConfigWriter
     from src.benchmarks import get_benchmark
     from src.models.physical_system import make_physical_system
     from src.models.state_llm_control import initial_controller_state
@@ -202,14 +211,18 @@ def main():
     ps = make_physical_system(config)
     _print_startup_summary(args, ps, config)
 
-    # Step 6 — assemble the LangGraph state and run the control loop.
-    state  = initial_controller_state(physical_system=ps, target_shape=args.target)
+    # Step 6 — initialize trajectory disk writer and build initial state.
+    config_writer = ConfigWriter(run_name=config.RUN_NAME)
+    state  = initial_controller_state(physical_system=ps, target_shape=args.target, config_writer=config_writer)
+
+    # Step 7 — run the control loop.
     graph  = build_controller_graph()
-    result = graph.invoke(state, {"recursion_limit": 10_000})
+    try:
+        result = graph.invoke(state, {"recursion_limit": 10_000})
+    finally:
+        config_writer.close()
 
-    save_run(result, ps)
-
-    # Step 7 — print end-of-run summary.
+    # Step 8 — print end-of-run summary.
     print("\n" + "="*70)
     print("CONTROL LOOP SUMMARY")
     print("="*70)
@@ -231,7 +244,7 @@ def main():
             print(f"  {iteration:3d}.  x0={decision['x0']:+.4f}  y0={decision['y0']:+.4f}  "
                   f"θ={decision['theta']:+.4f}  → tip: ({tip_x:+.6f}, {tip_y:+.6f}){status}")
 
-    print(f"\nConfigurations stored : {len(result['all_configurations'])}")
+    print(f"\nTrajectory snapshots   : {config_writer.snapshot_count}  (streamed to {config_writer.filepath.name})")
 
     if result.get("error"):
         print(f"\n[ERROR] {result['error']}")

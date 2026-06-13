@@ -2,23 +2,6 @@
 
 Work top-to-bottom within each section. Later sections depend on earlier ones.
 
----
-
-## 0. Completed
-
-- [x] PhysicalSystem class hierarchy — `BeamPhysicalSystem`, `RodPhysicalSystem` stub, dot access
-- [x] `losses.py` atomic primitives — `l_turn`, `l_pos`, `l_angle`, `l_dist`, `l_sign`, `l_inflect`, `l_contact`
-- [x] Benchmark registry — auto-discovery in `benchmarks/__init__.py`, `register()`, `get_benchmark()`
-- [x] Benchmark cases — C, U, S, L with `reference_fn`, `loss_fn`, standalone visualizer
-- [x] `test_all_shapes.py` — registry-wide validation and grid plot
-- [x] `Discrete_Elastic_Beams.py` — multi-wall system, `_update_contacts` / `_build_fixed_index`, `cx`/`cy` contact state, `controlled_nodes`, section headers
-- [x] `physical_system.py` — `walls` list replaces scalar `wall_H`; `_make_wall` converter
-- [x] `mechview_export.py` — one obstacle box per wall, correct surface placement
-- [x] `save_state.py` — run JSON written to `logs/`
-- [x] Visualization — mechview-based 3D viewer via `visualize.py`
-
----
-
 ## 1. Immediate — needed before `cli.py --target snake_L` works
 
 ### 1a. `config.py` ✓
@@ -45,6 +28,24 @@ Work top-to-bottom within each section. Later sections depend on earlier ones.
   walls in user-facing `{P0, P1}` format, `nv`, `rod_length`, `EI`, `EA`, `friction`
 - [ ] `save_state.py` serializes the above; `mechview_export.py` already reads `walls`
 
+### 1e. Streaming architecture for long runs ✓
+**Status: COMPLETED** (unified single JSONL instead of 3 separate files)
+
+Problem: `all_configurations` grows unbounded in memory during long runs.
+Solution: Stream configs incrementally to disk; keep only latest in state.
+
+Implementation:
+  - Single `run_<timestamp>_<pid>.jsonl` file (one line per DOF snapshot)
+  - Each snapshot tagged with iteration, BC command, error_percent, timestamp
+  - `ConfigWriter` class handles append-only I/O with auto-flush
+  - Programmer stores q_history in state buffer; evaluator writes to disk
+  - Removed all_configurations dict; state is now O(1) memory
+  - postrun_visuals.py reads JSONL for plotting
+  - Frame sequence export: `trajectory_frames/`, `orchestrator_iterations/`
+  - Real-time animations with metadata (BC, error, iteration number)
+
+Memory usage stays constant (O(1)) by design — write-flush-discard pattern proven.
+
 ---
 
 ## 2. Near-term benchmarks
@@ -69,17 +70,22 @@ Work top-to-bottom within each section. Later sections depend on earlier ones.
 
 ---
 
-## 4. Analysis plots (`src/visualization/plot_run.py`)
+## 4. Post-run visualization (`src/visualization/postrun_visuals.py`) ✓
+**Status: COMPLETED**
 
-Reads a `logs/run_<timestamp>.json` and produces static diagnostic figures.
-No 3D rendering — that is mechview's job. This module is for paper figures and debugging.
+Reads `logs/run_<timestamp>.jsonl` (streaming trajectory file) and produces diagnostic plots.
 
-- [ ] `plot_loss(log) -> Figure` — `error_percent` vs. iteration
-- [ ] `plot_control(log) -> Figure` — `x0`, `y0`, `theta` each vs. iteration (3-panel)
-- [ ] `plot_contact(log) -> Figure` — fraction of nodes in contact vs. iteration (if walls present)
-- [ ] `plot_improvement_stability(log) -> Figure` — signed step delta `L_t - L_{t+1}` as a bar chart
-- [ ] `main()` — CLI: `python -m src.visualization.plot_run logs/run_<timestamp>.json`
-  saves all figures to `viz/` alongside mechview output
+Implemented:
+- [x] `plot_error_curve()` — error_percent vs iteration
+- [x] `plot_trajectory_animation()` — animate all snapshots with fading
+- [x] `plot_iteration_shapes()` — grid of final shape per iteration with BC label
+- [x] `plot_single_iteration()` — detailed view of one iteration's snapshots
+- [x] CLI: `python -m src.visualization.postrun_visuals --run run_<timestamp> --all`
+  - `--run`: trajectory file stem
+  - `--error-curve`, `--animate`, `--shapes`, `--iter N`: individual plots
+  - `--output-dir`: save to directory instead of showing
+
+**Note:** mechview (3D viewer) handles 3D rendering; postrun_visuals handles 2D analysis plots
 
 ---
 

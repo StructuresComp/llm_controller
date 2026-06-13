@@ -45,24 +45,56 @@ def convert(raw: dict, output_path: Path) -> None:
     rod_length   = float(raw["rod_length"])
     r0           = float(raw.get("r0", 0.003))
     walls_raw    = raw.get("walls", [])        # list of {n, d, P0, P1} dicts; empty = no wall
-    frame_labels = raw.get("frame_labels", {}) # {str(frame_idx): label} — may be absent
 
     scale = 1.0 / rod_length
 
-    # Frames — normalise coordinates, attach per-frame label if present
+    # Frames — load from JSONL file (streaming trajectory)
+    # If raw["all_configurations"] exists (old format), use that for backward compatibility
     frames = []
-    for idx in sorted(raw["all_configurations"].keys(), key=int):
-        q_raw   = raw["all_configurations"][idx]
-        nodes   = _nodes_from_q(q_raw, nv, physics_type)
-        nodes_n = [[x * scale, y * scale, z * scale] for x, y, z in nodes]
-        frame   = {"t": int(idx), "nodes": nodes_n}
+    if "all_configurations" in raw:
+        # Fallback for old-format JSON files
+        frame_labels = raw.get("frame_labels", {})
+        for idx in sorted(raw["all_configurations"].keys(), key=int):
+            q_raw   = raw["all_configurations"][idx]
+            nodes   = _nodes_from_q(q_raw, nv, physics_type)
+            nodes_n = [[x * scale, y * scale, z * scale] for x, y, z in nodes]
+            frame   = {"t": int(idx), "nodes": nodes_n}
 
-        # frame_labels keys are stored as strings in JSON
-        label = frame_labels.get(str(idx)) or frame_labels.get(idx)
-        if label:
-            frame["label"] = label
+            label = frame_labels.get(str(idx)) or frame_labels.get(idx)
+            if label:
+                frame["label"] = label
 
-        frames.append(frame)
+            frames.append(frame)
+    else:
+        # New format: read from JSONL trajectory file
+        trajectory_file = raw.get("trajectory_file", "")
+        if trajectory_file:
+            from src.core.paths import LOGS_DIR
+            jsonl_path = LOGS_DIR / f"{trajectory_file}.jsonl"
+            if jsonl_path.exists():
+                frame_idx = 0
+                with open(jsonl_path, "r") as f:
+                    for line in f:
+                        if line.strip():
+                            snap = json.loads(line)
+                            q_raw = snap["q"]
+                            nodes = _nodes_from_q(q_raw, nv, physics_type)
+                            nodes_n = [[x * scale, y * scale, z * scale] for x, y, z in nodes]
+                            frame = {"t": frame_idx, "nodes": nodes_n}
+
+                            # Optionally annotate with BC command
+                            bc = snap.get("bc", {})
+                            error = snap.get("error_percent", 0)
+                            frame["label"] = (
+                                f"Iter {snap.get('iteration')}  "
+                                f"x={bc.get('x0', 0):+.4f}  y={bc.get('y0', 0):+.4f}  "
+                                f"θ={bc.get('theta', 0):+.3f}  error={error:.1f}%"
+                            )
+
+                            frames.append(frame)
+                            frame_idx += 1
+            else:
+                print(f"Warning: trajectory file {jsonl_path} not found", file=sys.stderr)
 
     # Obstacles — one box per wall; top surface placed at the physics contact plane.
     # P0/P1 are always present; large sentinel coordinates (used for "infinite" walls)

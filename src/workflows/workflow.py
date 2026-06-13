@@ -17,6 +17,7 @@
 
 from langgraph.graph import END, StateGraph
 
+from src.core import config
 from src.models.state_llm_control import ControllerState
 from src.agents.orchestrator_agent import build_orchestrator_graph
 from src.agents.safety_agent import safety_node
@@ -35,10 +36,14 @@ def _should_continue(state: ControllerState) -> str:
     Termination is controlled by the deterministic evaluator (eval_result["solved"]),
     not the LLM's convergence claim.  state["converged"] is recorded as a research
     measurement — how accurately the LLM recognises its own success.
+
+    Hard stop: if MAX_ITERATIONS is reached, end regardless of solve status.
     """
     if state.get("error"):
         return "end"
     if state.get("eval_result", {}).get("solved", False):
+        return "end"
+    if len(state.get("iteration_log", [])) >= config.MAX_ITERATIONS:
         return "end"
     return "orchestrator"
 

@@ -50,7 +50,7 @@ def _latest_observable(state: ControllerState) -> list:
 # ---------------------------------------------------------------------------
 
 def evaluator_node(state: ControllerState) -> dict:
-    """Look up the active benchmark and compute its loss against current shape."""
+    """Look up the active benchmark, compute its loss, and stream snapshots to disk."""
     nodes  = _latest_observable(state)
     target = state["target_shape"]
 
@@ -71,6 +71,28 @@ def evaluator_node(state: ControllerState) -> dict:
         print(f"[Evaluator] SOLVED  error={pct:.2f}% ≤ threshold={thr:.1f}%")
     else:
         print(f"[Evaluator] error={pct:.2f}%  (threshold={thr:.1f}%)")
+
+    # Write q_history snapshots to JSONL with the computed error_percent
+    config_writer = state.get("config_writer")
+    q_history     = state.get("q_history", [])
+    bc_current    = state.get("bc_current", [0.0, 0.0, 0.0])
+    ctime_current = state.get("ctime_current", 0.0)
+    iteration_num = len(state.get("iteration_log", []))  # programmer already added entry
+    orchestrator_prompt = state.get("orchestrator_prompt", None)
+
+    if config_writer and q_history:
+        for idx, q in enumerate(q_history):
+            snapshot_data = {
+                "iteration": iteration_num,
+                "bc": {"x0": bc_current[0], "y0": bc_current[1], "theta": bc_current[2]},
+                "q": q,
+                "error_percent": pct,
+                "timestamp": ctime_current,
+            }
+            # Add prompt only to first snapshot of this iteration
+            if idx == 0 and orchestrator_prompt:
+                snapshot_data["orchestrator_prompt"] = orchestrator_prompt
+            config_writer.append_snapshot(**snapshot_data)
 
     return {"eval_result": result}
 

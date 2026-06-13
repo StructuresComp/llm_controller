@@ -21,6 +21,7 @@
 LOG_LLM_CALLS = True   # True = log every prompt + response alongside the run JSON
 RUN_NAME      = ""     # stem for output files: <RUN_NAME>.json + <RUN_NAME>.log
                        # "" = auto-generate run_<timestamp>_<pid> for each file
+DEBUG         = False  # True = print LLM prompts and responses to terminal
 
 qwen = False  # if True, use Qwen models (only available via Ollama for now)
 if qwen:
@@ -62,8 +63,7 @@ CHECK_SHAPE_REFLECTION = False  # if True, also test reversed traversal and take
 
 ORCHESTRATOR_MODE = "plan"   # "plan" (grounded) or "myopic" (reactive)
 ALLOW_REPLAN      = False    # if True, orchestrator can discard and redo the plan
-MAX_ITERATIONS    = 50       # hard stop on orchestrator → programmer cycles
-
+MAX_ITERATIONS    = 10       # hard stop on orchestrator → programmer cycles
 
 # ===========================================================================
 # 3. SIMULATION & VISUALIZATION
@@ -85,7 +85,8 @@ VISC        = 1000.0   # viscous damping coefficient (Pa·s)
 # ---------------------------------------------------------------------------
 # 3b. Environment
 # ---------------------------------------------------------------------------
-WALLS = [{"P0": [-10, -0.12], "P1": [10, -0.12]}]
+WALLS = []  # list of wall dicts; empty = no wall
+# WALLS = [{"P0": [-10, -0.12], "P1": [10, -0.12]}]
 # Each wall is a directed segment {"P0": [x0,y0], "P1": [x1,y1]}.
 # Outward normal = (P1-P0) rotated 90° CCW — traversal order sets which side is blocked.
 # Use large sentinels (±10) for walls that should span the full simulation domain.
@@ -97,7 +98,7 @@ TOLERANCE_DISTANCE = 0.1 * ROD_LENGTH  # min clearance (m) the controlled nodes 
 
 BOUNDARY_VELOCITY       = 0.05   # translational speed of node 0 (m/s)
 BOUNDARY_ANGLE_VELOCITY = 0.05   # rotational speed of node 0 (rad/s)
-DT                      = 0.001   # time step size for physics integration (s); smaller = more accurate but slower
+DT                      = 0.01   # time step size for physics integration (s); smaller = more accurate but slower
 FRICTION                = False  # True = wall fixes x and y; False = wall fixes y only (frictionless)
 
 # ---------------------------------------------------------------------------

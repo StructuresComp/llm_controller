@@ -53,9 +53,14 @@ class BeamPhysicalSystem(PhysicalSystemBase):
         EI:               float,
         EA:               float,
         deltaL:           float,
-        m:                list,
-        W:                list,
-        C_diag:           list,
+        m:                np.ndarray,
+        W:                np.ndarray,
+        damping:          list,
+        massMatrix:       np.ndarray,
+        damping_matrix:   np.ndarray,
+        ndof:             int,
+        tol:              float,
+        maximum_iter:     int,
         observable_nodes:  list,
         controlled_nodes:  list,
     ):
@@ -77,9 +82,14 @@ class BeamPhysicalSystem(PhysicalSystemBase):
         self.EI               = EI
         self.EA               = EA
         self.deltaL           = deltaL
-        self.m                = m
-        self.W                = W
-        self.C_diag           = C_diag
+        self.m                = m                # numpy array; pre-computed for speed
+        self.W                = W                # numpy array; pre-computed for speed
+        self.damping          = damping
+        self.massMatrix       = massMatrix
+        self.damping_matrix   = damping_matrix
+        self.ndof             = ndof             # total degrees of freedom (2*nv)
+        self.tol              = tol              # Newton convergence tolerance
+        self.maximum_iter     = maximum_iter     # max Newton iterations per step
         self.observable_nodes  = observable_nodes
         self.controlled_nodes  = controlled_nodes
         self.controlled_set    = set(controlled_nodes)   # precomputed; never changes
@@ -174,10 +184,18 @@ def make_physical_system(cfg=None) -> BeamPhysicalSystem:
         W[2*k]     = m[2*k]     * g[0]
         W[2*k + 1] = m[2*k + 1] * g[1]
 
-    C_diag = np.zeros(2 * nv)
+    damping = np.zeros(2 * nv)
     for k in range(nv):
-        C_diag[2*k]     = visc * deltaL
-        C_diag[2*k + 1] = visc * deltaL
+        damping[2*k]     = visc * deltaL
+        damping[2*k + 1] = visc * deltaL
+
+    # Pre-compute for discreteBeam efficiency (one-time cost at startup)
+    ndof = 2 * nv
+    tol = EI / rod_length**2 * 1e-3
+    maximum_iter = 50
+
+    massMatrix = np.diag(m)
+    damping_matrix = np.diag(damping)
 
     return BeamPhysicalSystem(
         nv         = nv,
@@ -193,9 +211,14 @@ def make_physical_system(cfg=None) -> BeamPhysicalSystem:
         EI         = float(EI),
         EA         = float(EA),
         deltaL     = float(deltaL),
-        m                = m.tolist(),
-        W                = W.tolist(),
-        C_diag           = C_diag.tolist(),
+        m                = m,                  # store as numpy array
+        W                = W,                  # store as numpy array
+        damping          = damping.tolist(),
+        massMatrix       = massMatrix,
+        damping_matrix   = damping_matrix,
+        ndof             = ndof,
+        tol              = tol,
+        maximum_iter     = maximum_iter,
         observable_nodes = observable_nodes,
         controlled_nodes = controlled_nodes,
     )

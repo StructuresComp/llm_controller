@@ -6,8 +6,25 @@
 # planner_node  — writes a strategy to state["plan"] on the first call in
 #                 "plan" mode; no-op otherwise.
 # decision_node — always runs; appends state["plan"] to the prompt (empty
-#                 string in myopic mode = no effect); calls LLM with BC
-#                 schema to produce state["decision"].
+#                 string in myopic mode = no effect); calls LLM twice:
+#                 (1) BC decision with _BC_SCHEMA
+#                 (2) convergence assessment with _CONVERGED_SCHEMA
+#                 Both results merged into a single atomic output.
+#
+# INPUT/OUTPUT MANIFEST:
+# ---------------------------------------------------------------------------
+# planner_node:
+#   Input:  state["plan"], state["target_shape"], state["physical_system"]
+#   Output: state["plan"]
+#
+# decision_node:
+#   Input:  state["shape_history"], state["bc_history"], state["plan"],
+#           state["eval_result"], state["physical_system"], state["target_shape"],
+#           state["iteration_log"]
+#   Output: state["decision"] {x0, y0, theta}
+#           state["converged"] bool
+#           state["orchestrator_prompt"] str (for JSONL traceability)
+# ---------------------------------------------------------------------------
 #
 # Section order:
 #   1. Imports  2. Schemas  3. Prompts  4. Helpers  5. Nodes  6. Graph  7. Main  8. Entry
@@ -41,11 +58,11 @@ _BC_SCHEMA = {
         "properties": {
             "x0": {
                 "type": "number",
-                "description": "Target x-position of node 0 (metres). Positive = right.",
+                "description": "Target x-position of node 0 (meters). Positive = right.",
             },
             "y0": {
                 "type": "number",
-                "description": "Target y-position of node 0 (metres). Negative = below origin.",
+                "description": "Target y-position of node 0 (meters). Negative = below origin.",
             },
             "theta": {
                 "type": "number",
@@ -123,9 +140,13 @@ Note: High EI means the beam resists bending — you need strong moves. Start gr
 
 _DECISION_SYSTEM = (
     "You are controlling an elastic beam pressed against a wall. Your job is to issue "
-    "the next boundary condition move (x0, y0, theta) to steer the beam toward the target "
-    "shape. Think about beam mechanics: which moves will bend it in the right direction? "
-    "When does the beam contact the wall? Can you backtrack if you went wrong?"
+    "the next boundary condition move by calling the 'set_boundary_condition' tool.\n\n"
+    "TOOL SCHEMA: set_boundary_condition\n"
+    "  x0 (number): target x-position of node 0 (meters)\n"
+    "  y0 (number): target y-position of node 0 (meters)\n"
+    "  theta (number): target angle in radians (0 = straight down, π/2 = right, -π/2 = left)\n\n"
+    "Think about beam mechanics: which moves will bend it toward the target shape? "
+    "When does it contact the wall? Should you backtrack if progress stalled?"
 )
 
 _DECISION_PROMPT = """\
@@ -222,6 +243,15 @@ def planner_node(state: ControllerState) -> dict:
         EI               = ps.EI,
         target_shape     = state["target_shape"] or "unspecified",
     )
+    if config.DEBUG:
+        print("\n" + "="*70)
+        print("[PLANNER SYSTEM]")
+        print("="*70)
+        print(_PLAN_SYSTEM)
+        print("\n[PLANNER PROMPT]")
+        print("="*70)
+        print(prompt)
+        print("="*70 + "\n")
     plan = call_llm(prompt=prompt, system=_PLAN_SYSTEM)
     return {"plan": plan}
 
@@ -253,6 +283,16 @@ def decision_node(state: ControllerState) -> dict:
         eval_section     = _format_eval_section(state.get("eval_result", {})),
     )
 
+    if config.DEBUG:
+        print("\n" + "="*70)
+        print("[DECISION SYSTEM]")
+        print("="*70)
+        print(_DECISION_SYSTEM)
+        print("\n[DECISION PROMPT]")
+        print("="*70)
+        print(prompt)
+        print("="*70 + "\n")
+
     # BC decision — schema-enforced, never free JSON
     decision = call_llm_with_tool(
         prompt      = prompt,
@@ -268,17 +308,27 @@ def decision_node(state: ControllerState) -> dict:
 
     # Convergence assessment
     eval_result = state.get("eval_result", {})
+    convergence_prompt = (
+        f"TARGET SHAPE: {state['target_shape']}\n"
+        f"WALL: {describe_walls(ps.walls)}\n\n"
+        f"CURRENT BEAM STATE (observable nodes):\n"
+        f"{current_section}"
+        + (_format_eval_section(eval_result) if eval_result else "")
+        + f"\nHas the beam been deformed into a {state['target_shape']} shape? "
+        f"Judge by: curvature direction, symmetry, contact with the wall, overall shape match. "
+        f"Be strict: the shape must clearly match the target."
+    )
+    if config.DEBUG:
+        print("\n" + "="*70)
+        print("[CONVERGENCE SYSTEM]")
+        print("="*70)
+        print("You are a structural mechanics expert. Judge whether the current beam deformation matches the target shape.")
+        print("\n[CONVERGENCE PROMPT]")
+        print("="*70)
+        print(convergence_prompt)
+        print("="*70 + "\n")
     convergence = call_llm_with_tool(
-        prompt = (
-            f"TARGET SHAPE: {state['target_shape']}\n"
-            f"WALL: {describe_walls(ps.walls)}\n\n"
-            f"CURRENT BEAM STATE (observable nodes):\n"
-            f"{current_section}"
-            + (_format_eval_section(eval_result) if eval_result else "")
-            + f"\nHas the beam been deformed into a {state['target_shape']} shape? "
-            f"Judge by: curvature direction, symmetry, contact with the wall, overall shape match. "
-            f"Be strict: the shape must clearly match the target."
-        ),
+        prompt = convergence_prompt,
         tool_schema = _CONVERGED_SCHEMA,
         tool_name   = "assess_convergence",
         system      = "You are a structural mechanics expert. Judge whether the current beam deformation matches the target shape.",
@@ -293,6 +343,7 @@ def decision_node(state: ControllerState) -> dict:
     updates: dict = {
         "decision":  decision,
         "converged": convergence["converged"],
+        "orchestrator_prompt": prompt,  # Store for JSONL traceability
     }
 
     # Replan if stagnating and ALLOW_REPLAN is set

@@ -2,6 +2,7 @@
 # Core
 # ---------------------------------------------------------------------------
 numpy
+scipy
 matplotlib
 langgraph
 python-dotenv

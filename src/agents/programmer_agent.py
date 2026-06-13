@@ -89,19 +89,6 @@ def append_and_trim(history: list, item, max_len: int) -> list:
     return (history + [item])[-max_len:]
 
 
-def trim_configs(configs: dict, max_configs: int) -> dict:
-    """
-    Fallback guard: if len(configs) > max_configs, drop the oldest entries
-    (lowest keys) so recent history is always preserved. Re-indexes from 0.
-    SAVE_STRIDE is the primary control; this should rarely trigger.
-    """
-    if len(configs) <= max_configs:
-        return configs
-    sorted_keys = sorted(configs.keys(), key=int)
-    kept = sorted_keys[-max_configs:]
-    return {new_k: configs[old_k] for new_k, old_k in enumerate(kept)}
-
-
 # ---------------------------------------------------------------------------
 # 5. NODES
 # ---------------------------------------------------------------------------
@@ -128,35 +115,10 @@ def programmer_node(state: ControllerState) -> dict:
         return {"error": f"Programmer: {result['message']}"}
 
     q_new = result["q_new"]
+    q_history = result.get("q_history", [q_new])
 
     # --- Update continuity fields ---
     bc_current = [decision["x0"], decision["y0"], decision["theta"]]
-
-    # --- Update all_configurations and frame_labels ---
-    # Append every snapshot from this decision's q_history (already strided
-    # by SAVE_STRIDE inside discreteBeam; final step always included).
-    # Label the last frame of this decision so the viewer can display what
-    # control action produced it.
-    # Then apply MAX_CONFIGS as a hard fallback guard, trimming oldest.
-    configs  = dict(state["all_configurations"])
-    labels   = dict(state["frame_labels"])
-    next_idx = len(configs)
-    q_history = result.get("q_history", [q_new])
-    for i, q in enumerate(q_history):
-        configs[next_idx + i] = q
-
-    x0    = decision["x0"]
-    y0    = decision["y0"]
-    theta = decision["theta"]
-    iteration_num = len(state["iteration_log"]) + 1
-    labels[next_idx + len(q_history) - 1] = (
-        f"Step {iteration_num}  "
-        f"x={x0:+.4f}  y={y0:+.4f}  θ={theta:+.3f} rad"
-    )
-
-    configs = trim_configs(configs, config.MAX_CONFIGS)
-    # Keep labels in sync — drop any whose frame was trimmed away
-    labels  = {k: v for k, v in labels.items() if k in configs}
 
     # --- Update rolling histories (observable nodes only) ---
     obs_q   = extract_observable_q(q_new, ps)
@@ -180,8 +142,8 @@ def programmer_node(state: ControllerState) -> dict:
         "u0_current":        result["u_new"],
         "ctime_current":     result["ctime"],
         "bc_current":        bc_current,
-        "all_configurations": configs,
-        "frame_labels":      labels,
+        "latest_config":     q_new,
+        "q_history":         q_history,
         "shape_history":     shape_history,
         "bc_history":        bc_history,
         "result":            report,
@@ -209,8 +171,8 @@ def main():
         print(f"[ERROR] {updates['error']}")
     else:
         print(updates["result"])
-        print(f"\nConfigs stored: {len(updates['all_configurations'])}")
-        print(f"Shape history:  {len(updates['shape_history'])} entries")
+        print(f"\nSnapshots generated: {len(updates['q_history'])}")
+        print(f"Shape history:      {len(updates['shape_history'])} entries")
 
 
 # ---------------------------------------------------------------------------

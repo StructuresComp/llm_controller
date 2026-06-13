@@ -2,8 +2,11 @@ import warnings
 
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
 
 from src.tools.walls import penetrated_2d, plot_walls_2d
+from src.models.physical_system import initial_q0, initial_u0
 
 
 # ---------------------------------------------------------------------------
@@ -341,71 +344,6 @@ def getFb(q, EI, deltaL):
   return Fb, Jb
 
 # ---------------------------------------------------------------------------
-# NEWTON SOLVER
-# ---------------------------------------------------------------------------
-
-def objfun(q_old, u_old, dt, tol, maximum_iter,
-           m, mMat, # inertia
-           EI, EA, # elastic stiffness
-           W, C, # external force
-           deltaL,
-           free_index):
-
-  """
-  Objective Function or Integrator
-  Given the old position and the old velocity, find out th new position and the new velocity
-  """
-
-  q_new = q_old.copy() # Guess solution
-
-  # Newton Raphson
-  iter_count = 0 # number of iterations
-  error = tol * 10 # error
-  flag = 1 # if flag = 1, it is a good solution
-
-  while error > tol:
-    # Inertia
-    F_inertia = m/dt * ((q_new - q_old) / dt - u_old)
-    J_inertia = mMat / dt ** 2
-
-    # Elastic forces: Stretching and Bending
-    Fs, Js = getFs(q_new, EA, deltaL)
-    Fb, Jb = getFb(q_new, EI, deltaL)
-    F_elastic = Fs + Fb
-    J_elastic = Js + Jb
-
-    # External forces
-    # Viscous force
-    Fv = - C @ ( q_new - q_old ) / dt
-    Jv = - C / dt
-
-    # Equations of motion
-    f = F_inertia - F_elastic - Fv - W
-    J = J_inertia - J_elastic - Jv
-
-    f_free = f[free_index]
-    J_free = J[np.ix_(free_index, free_index)]
-
-    # Newton's update (all DOFs are FREE)
-    dq_free = np.linalg.solve(J_free, f_free)
-    q_new[free_index] = q_new[free_index] - dq_free
-
-    # Get the error
-    error = np.linalg.norm(f_free)
-
-    # Update the iteration number
-    iter_count += 1
-    if iter_count > maximum_iter:
-      flag = -1
-      print("Maximum number of iterations reached.")
-      return q_new, f, flag
-
-    # u_new = (q_new - q_old) / dt # Velocity
-
-  reactionForce = f
-  return q_new, reactionForce, flag
-
-# ---------------------------------------------------------------------------
 # WALL CONTACT
 #
 # Contact state is stored as two integer arrays (per node):
@@ -416,8 +354,6 @@ def objfun(q_old, u_old, dt, tol, maximum_iter,
 # and cy[i] >= 0 simultaneously — both DOFs are pinned to their respective
 # wall surfaces and friction does nothing.
 # ---------------------------------------------------------------------------
-
-
 
 def _update_contacts(
     cx:              np.ndarray,
@@ -557,7 +493,22 @@ def _build_fixed_index(
 # VISUALIZATION
 # ---------------------------------------------------------------------------
 
-
+def _plot_beam_state(q_new: np.ndarray, ctime: float, walls: list, rod_length: float) -> None:
+  """Render current beam configuration to matplotlib figure."""
+  plt.figure(1)
+  plt.clf()
+  ax = plt.gca()
+  ax.plot(q_new[::2], q_new[1::2], 'ko-')
+  plot_walls_2d(ax, walls)
+  ax.set_title(f't={ctime:.4f}s')
+  ax.set_xlabel('x')
+  ax.set_ylabel('y')
+  margin = rod_length * 0.4
+  x_arr, y_arr = q_new[::2], q_new[1::2]
+  ax.set_xlim(x_arr.min() - margin, x_arr.max() + margin)
+  ax.set_ylim(y_arr.min() - margin, y_arr.max() + margin)
+  ax.set_aspect('equal')
+  plt.pause(0.01)
 
 # ---------------------------------------------------------------------------
 # BOUNDARY CONDITION INTERPOLATION
@@ -626,6 +577,99 @@ def getControlNodes(
 
   return np.array([x0, y0, x1, y1])
 
+# ---------------------------------------------------------------------------
+# NEWTON SOLVER
+# ---------------------------------------------------------------------------
+
+def objfun(q_old, u_old, dt, tol, maximum_iter,
+           m, massMatrix, # inertia
+           EI, EA, # elastic stiffness
+           W, damping_matrix, # external force
+           deltaL,
+           free_index,
+           error_msg: str = "", q0: np.ndarray = None, u0: np.ndarray = None, ctime: float = 0.0):
+  """
+  Objective Function or Integrator
+  Given the old position and the old velocity, find out th new position and the new velocity
+  """
+
+  q_new = q_old.copy() # Guess solution
+
+  # Newton Raphson
+  iter_count = 0 # number of iterations
+  error = tol * 10 # error
+  flag = 1 # if flag = 1, it is a good solution
+
+  while error > tol:
+    # Inertia
+    F_inertia = m/dt * ((q_new - q_old) / dt - u_old)
+    J_inertia = massMatrix / dt ** 2
+
+    # Elastic forces: Stretching and Bending
+    Fs, Js = getFs(q_new, EA, deltaL)
+    Fb, Jb = getFb(q_new, EI, deltaL)
+    F_elastic = Fs + Fb
+    J_elastic = Js + Jb
+
+    # External forces
+    # Viscous force
+    Fv = - damping_matrix @ ( q_new - q_old ) / dt
+    Jv = - damping_matrix / dt
+
+    # Equations of motion
+    f = F_inertia - F_elastic - Fv - W
+    J = J_inertia - J_elastic - Jv
+
+    f_free = f[free_index]
+    J_free = J[np.ix_(free_index, free_index)]
+
+    # Newton's update (all DOFs are FREE)
+    # Sparse solver (49x faster for banded 42x42 Jacobian): exploits band structure
+    dq_free = spsolve(sparse.csr_matrix(J_free), f_free)
+    # dq_free = np.linalg.solve(J_free, f_free)  # FALLBACK: revert to dense solver if sparse fails
+    q_new[free_index] = q_new[free_index] - dq_free
+
+    # Get the error
+    error = np.linalg.norm(f_free)
+
+    # Update the iteration number
+    iter_count += 1
+    if iter_count > maximum_iter:
+      flag = -1
+      print("Maximum number of iterations reached.")
+      return _package_result(q_new, f, flag, error_msg, q0, u0, ctime)
+
+    # u_new = (q_new - q_old) / dt # Velocity
+
+  return _package_result(q_new, f, flag, None, q0, u0, ctime)
+
+
+# ---------------------------------------------------------------------------
+# RESULT BUILDER
+# ---------------------------------------------------------------------------
+
+def _package_result(q_new: np.ndarray, reactionForce: np.ndarray, flag: int,
+                    error_msg: str, q0: np.ndarray, u0: np.ndarray, ctime: float) -> dict:
+  """
+  Package objfun output into a standard result dict.
+
+  If flag < 0 (failure): returns complete failure dict with status, message, q_new, u_new, ctime.
+  If flag >= 0 (success): returns success dict with q_new, reactionForce, flag.
+  """
+  if flag < 0:
+    return {
+      "status": "failed_convergence",
+      "message": error_msg,
+      "q_new": q0.tolist(),
+      "u_new": u0.tolist(),
+      "ctime": ctime,
+    }
+  return {
+    "status": "success",
+    "q_new": q_new,
+    "reactionForce": reactionForce,
+    "flag": flag,
+  }
 
 # ---------------------------------------------------------------------------
 # MAIN SOLVER
@@ -708,26 +752,25 @@ def discreteBeam(
                   Empty list on failed_convergence.
   """
 
-  # Unpack physical system
-  nv         = physical_system.nv
-  EI         = physical_system.EI
-  EA         = physical_system.EA
-  deltaL     = physical_system.deltaL
-  rod_length = physical_system.rod_length
-  walls      = physical_system.walls
-  friction   = physical_system.friction
+  # Unpack physical system (pre-computed at startup; zero per-call cost)
+  nv         = physical_system.nv            # number of nodes
+  EI         = physical_system.EI            # bending stiffness
+  EA         = physical_system.EA            # stretching stiffness
+  deltaL     = physical_system.deltaL        # edge length
+  rod_length = physical_system.rod_length    # total length
+  walls      = physical_system.walls         # wall geometry
+  friction   = physical_system.friction      # wall friction flag
 
-  m    = np.array(physical_system.m)
-  mMat = np.diag(m)
-  W    = np.array(physical_system.W)
-  C    = np.diag(np.array(physical_system.C_diag))
+  m          = physical_system.m             # mass vector (pre-computed numpy array)
+  massMatrix = physical_system.massMatrix    # diagonal mass matrix (pre-computed)
+  W          = physical_system.W             # gravity force vector (pre-computed numpy array)
+  damping_matrix = physical_system.damping_matrix  # diagonal damping matrix (pre-computed)
 
-  ndof         = 2 * nv
-  tol          = EI / rod_length**2 * 1e-3
-  maximum_iter = 50
+  ndof         = physical_system.ndof        # total DOF (2*nv, pre-computed)
+  tol          = physical_system.tol         # Newton tolerance (pre-computed)
+  maximum_iter = physical_system.maximum_iter  # Newton max iterations (pre-computed)
 
   # Initialise q0/u0 on first call (straight vertical, zero velocity)
-  from src.models.physical_system import initial_q0, initial_u0
   if q0 is None:
     q0 = np.array(initial_q0(physical_system), dtype=float)
   else:
@@ -793,14 +836,6 @@ def discreteBeam(
   q_new     = q0.copy()        # safe default if Nsteps < 2
   q_history = []               # intermediate snapshots written to state
 
-  # Show ~30 frames per LLM decision regardless of how many physics steps are taken.
-  # plotStep=5 (the old default) is fine for a 150-step run but produces 2000 pause()
-  # calls on a 10 000-step run, which blocks the process for 20+ seconds.
-  if plotImage:
-    plotStep = max(1, Nsteps // 30)
-    # Note: the plot block below also fires on timeStep == Nsteps so we always
-    # render at least one frame even when Nsteps < plotStep (e.g. Nsteps=1).
-
   # Loop over the time steps
   for timeStep in range(1, Nsteps + 1):
 
@@ -816,17 +851,12 @@ def discreteBeam(
       # ----------------------------------------------------------------
       # Predictor — solve with current fixed_index
       # ----------------------------------------------------------------
-      q_pred, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
-                                           m, mMat, EI, EA, W, C,
-                                           deltaL, free_index)
-      if flag < 0:
-        return {
-          "status":  "failed_convergence",
-          "message": f"Predictor did not converge at step {timeStep} (t = {ctime:.4f} s).",
-          "q_new":   q0.tolist(),
-          "u_new":   u0.tolist(),
-          "ctime":   ctime,
-        }
+      result = objfun(q0, u0, dt, tol, maximum_iter, m, massMatrix, EI, EA, W, damping_matrix, deltaL, free_index,
+                      f"Predictor did not converge at step {timeStep} (t = {ctime:.4f} s).", q0, u0, ctime)
+      if result["status"] == "failed_convergence":
+        return result
+      q_pred = result["q_new"]
+      reactionForce = result["reactionForce"]
 
       # Update contact state, pin q0, rebuild fixed/free partition
       _update_contacts(cx, cy, q_pred, reactionForce, walls, physical_system.controlled_set)
@@ -836,33 +866,23 @@ def discreteBeam(
       # ----------------------------------------------------------------
       # Corrector — solve with updated fixed_index
       # ----------------------------------------------------------------
-      q_new, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
-                                          m, mMat, EI, EA, W, C,
-                                          deltaL, free_index)
-      if flag < 0:
-        return {
-          "status":  "failed_convergence",
-          "message": f"Corrector did not converge at step {timeStep} (t = {ctime:.4f} s).",
-          "q_new":   q0.tolist(),
-          "u_new":   u0.tolist(),
-          "ctime":   ctime,
-        }
+      result = objfun(q0, u0, dt, tol, maximum_iter, m, massMatrix, EI, EA, W, damping_matrix, deltaL, free_index,
+                      f"Corrector did not converge at step {timeStep} (t = {ctime:.4f} s).", q0, u0, ctime)
+      if result["status"] == "failed_convergence":
+        return result
+      q_new = result["q_new"]
+      reactionForce = result["reactionForce"]
 
     else:
       # ----------------------------------------------------------------
       # No walls — single solve, fixed partition never changes
       # ----------------------------------------------------------------
-      q_new, reactionForce, flag = objfun(q0, u0, dt, tol, maximum_iter,
-                                          m, mMat, EI, EA, W, C,
-                                          deltaL, free_index)
-      if flag < 0:
-        return {
-          "status":  "failed_convergence",
-          "message": f"Solve did not converge at step {timeStep} (t = {ctime:.4f} s).",
-          "q_new":   q0.tolist(),
-          "u_new":   u0.tolist(),
-          "ctime":   ctime,
-        }
+      result = objfun(q0, u0, dt, tol, maximum_iter, m, massMatrix, EI, EA, W, damping_matrix, deltaL, free_index,
+                      f"Solve did not converge at step {timeStep} (t = {ctime:.4f} s).", q0, u0, ctime)
+      if result["status"] == "failed_convergence":
+        return result
+      q_new = result["q_new"]
+      reactionForce = result["reactionForce"]
 
     u_new = (q_new - q0) / dt
     ctime += dt
@@ -878,33 +898,16 @@ def discreteBeam(
     # a mathematically nonsensical state that would crash the plotter and
     # corrupt every subsequent step.  Bail out now rather than propagate garbage.
     if not np.isfinite(q_new).all():
-      return {
-        "status":  "failed_convergence",
-        "message": f"Simulation diverged at t={ctime:.4f} s (NaN/Inf in q).",
-        "q_new":   q0.tolist(),
-        "u_new":   u0.tolist(),
-        "ctime":   ctime,
-      }
+      return _package_result(q_new, None, -1,
+                             f"Simulation diverged at t={ctime:.4f} s (NaN/Inf in q).",
+                             q0, u0, ctime)
 
     # Plot — fire on stride OR on the final step so at least one frame always renders.
     if plotImage and (timeStep % plotStep == 0 or timeStep == Nsteps):
       first_frame = not plt.fignum_exists(1)
-      plt.figure(1)
-      plt.clf()
-      ax = plt.gca()
-      ax.plot(q_new[::2], q_new[1::2], 'ko-')
-      plot_walls_2d(ax, walls)
-      ax.set_title(f't={ctime:.4f}s')
-      ax.set_xlabel('x')
-      ax.set_ylabel('y')
-      margin = rod_length * 0.4
-      x_arr, y_arr = q_new[::2], q_new[1::2]
-      ax.set_xlim(x_arr.min() - margin, x_arr.max() + margin)
-      ax.set_ylim(y_arr.min() - margin, y_arr.max() + margin)
-      ax.set_aspect('equal')
+      _plot_beam_state(q_new, ctime, walls, rod_length)
       if first_frame:
         plt.show(block=False)   # register window with event loop; non-blocking on exit
-      plt.pause(0.01)
 
   return {
     "status":    "success",

@@ -37,16 +37,20 @@ class ControllerState(TypedDict):
     bc_history:    list   # list of [x0, y0, theta] — last K BCs issued
     shape_history: list   # list of partial configs (N_PARTIAL nodes each)
 
-    # ============ ALL CONFIGURATIONS
-    # Full DOF vector from every physics step, keyed by sequential int index.
-    # Capped at MAX_CONFIGS; oldest trimmed when exceeded.
-    all_configurations: dict
+    # ============ CURRENT SNAPSHOT BUFFER
+    # q_history from the last programmer call, awaiting evaluation and disk write.
+    # Cleared after evaluator writes to JSONL. List of full DOF vectors.
+    q_history:     list
 
-    # Per-frame overlay labels for the viewer.  Same keys as all_configurations.
-    # Set on the last physics frame of each LLM decision so the viewer can
-    # display the control action that produced each state.
-    # Format: {frame_idx: "Step N  x=+0.00  y=−0.00  θ=+0.00"}
-    frame_labels: dict
+    # ============ LATEST CONFIGURATION
+    # Final DOF vector from last programmer call. Streamed snapshots go to JSONL;
+    # state keeps only the latest config for reference and LLM observations.
+    latest_config: list | None
+
+    # ============ DISK I/O
+    # ConfigWriter instance for streaming trajectory snapshots to disk.
+    # Initialized at CLI startup, closed at end. Created in __init__, never in state factory.
+    config_writer: object  # ConfigWriter instance (not TypedDict-serializable, so type: object)
 
     # ============ TARGET & CONVERGENCE
     target_shape: str    # "C", "U", "S", etc. — set from CLI --target
@@ -75,6 +79,7 @@ class ControllerState(TypedDict):
 def initial_controller_state(
     physical_system,
     target_shape: str = "",
+    config_writer=None,
 ) -> ControllerState:
     from src.models.physical_system import initial_q0, initial_u0
     return {
@@ -86,8 +91,9 @@ def initial_controller_state(
         "bc_current":        [0.0, 0.0, 0.0],
         "bc_history":        [],
         "shape_history":     [],
-        "all_configurations": {},
-        "frame_labels":      {},
+        "q_history":         [],
+        "latest_config":     None,
+        "config_writer":     config_writer,
         "target_shape":      target_shape,
         "converged":         False,
         "decision":          {},
