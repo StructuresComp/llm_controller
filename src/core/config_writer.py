@@ -7,7 +7,7 @@
 #   {"iteration": N, "bc": {...}, "q": [...], "error_percent": X, "timestamp": T}
 #
 # File is flushed to disk after every write — memory usage is O(1).
-# Post-run, postrun_visuals.py reads this file to reconstruct and plot trajectories.
+# Post-run, analysis_plots.py reads this file to reconstruct and plot trajectories.
 # ---------------------------------------------------------------------------
 
 import json

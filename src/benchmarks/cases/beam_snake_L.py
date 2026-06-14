@@ -7,7 +7,7 @@ Run standalone:
 """
 
 from src.benchmarks import BenchmarkCase, register
-from src.benchmarks.shapes.profile_tip_reach import tip_reach_loss
+from src.benchmarks.loss_beam.profile_tip_reach import tip_reach_loss
 
 
 TARGET_X = 0.05

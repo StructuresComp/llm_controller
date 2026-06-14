@@ -1,19 +1,19 @@
 # ---------------------------------------------------------------------------
-# src/visualization/postrun_visuals.py
+# analysis_plots.py
 # ---------------------------------------------------------------------------
-# Post-run trajectory visualization from JSONL streaming files.
+# Post-run trajectory analysis from JSONL streaming files.
 #
-# Reads run_*.jsonl (trajectory snapshots) and generates animations:
+# Reads run_*.jsonl (trajectory snapshots) and generates analysis plots:
 #   - Error curve (static plot)
 #   - Trajectory animation (all snapshots over time)
 #   - Iteration shapes animation (final shape per iteration)
 #   - Detailed iteration view (all snapshots within one iteration)
 #
 # Usage:
-#   python postrun_visuals.py                    # uses latest run
-#   python postrun_visuals.py --run run_1234     # specific run
-#   python postrun_visuals.py --iter 5           # detail view of iteration 5
-#   python postrun_visuals.py --all --output-dir viz/  # save all plots
+#   python3 analysis_plots.py                    # uses latest run
+#   python3 analysis_plots.py --run run_1234     # specific run
+#   python3 analysis_plots.py --iter 5           # detail view of iteration 5
+#   python3 analysis_plots.py --all --output-dir viz/  # save all plots
 # ---------------------------------------------------------------------------
 
 import json

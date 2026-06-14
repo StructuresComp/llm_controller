@@ -30,6 +30,7 @@ this file — they compute their loss directly in the case file.
 
 import numpy as np
 from typing import Callable, List, Tuple
+from scipy.interpolate import CubicSpline
 
 
 def build_ideal_from_edge_profile(
@@ -143,3 +144,63 @@ def profile_loss(nodes: list, profile_fn: Callable, fit_fn: Callable) -> dict:
         "fitted_params":      params,
         "diagnostics":        diag,
     }
+
+
+def make_profile_from_nodes(nodes: list) -> Tuple[Callable, Callable]:
+    """
+    Create a turning-angle profile from a sequence of (x, y) nodes.
+
+    Extracts relative turning angles (change in direction at each arc-length)
+    and interpolates with cubic spline. Follows the same convention as C, S, U, L:
+    - First two nodes define initial position and slope
+    - Profile encodes relative turning angles (dtheta = angle - first_angle)
+    - Can be used directly with profile_loss and build_ideal_from_edge_profile
+
+    Args:
+        nodes: list of (x, y) tuples defining the target shape
+
+    Returns:
+        (profile_fn, fit_fn) tuple matching the standard profile API:
+        - profile_fn(s, **params) → relative turning angle at arc-length s ∈ [0, 1]
+        - fit_fn(s, dtheta) → {} (no-op; profile is fully specified)
+    """
+    nodes_array = np.array(nodes, dtype=float)
+    if len(nodes_array) < 3:
+        raise ValueError("Need at least 3 nodes to compute curvature profile")
+
+    # Arc-length parameterization
+    edge_vecs = np.diff(nodes_array, axis=0)
+    edge_lengths = np.linalg.norm(edge_vecs, axis=1)
+    total_arc = float(np.sum(edge_lengths))
+
+    if total_arc < 1e-10:
+        raise ValueError("Nodes are too close; total arc length is near zero")
+
+    # Normalize arc-length to [0, 1]
+    s_nodes = np.zeros(len(nodes_array))
+    s_nodes[1:] = np.cumsum(edge_lengths) / total_arc
+    s_edges = (s_nodes[:-1] + s_nodes[1:]) / 2.0
+
+    # Compute absolute tangent angles at each edge (like theta_edges in _fit_one_dir)
+    theta_edges = np.arctan2(edge_vecs[:, 0], -edge_vecs[:, 1])
+
+    # Extract relative turning angles from the first edge (like dtheta in _fit_one_dir)
+    theta_start = float(theta_edges[0])
+    dtheta = (theta_edges - theta_start + np.pi) % (2 * np.pi) - np.pi
+
+    # Normalize arc-length for the profile to [0, 1] over edge range
+    s0, span = s_edges[0], s_edges[-1] - s_edges[0] + 1e-12
+    s_norm_edges = (s_edges - s0) / span
+
+    # Create cubic spline from relative turning angles
+    cs = CubicSpline(s_norm_edges, dtheta, bc_type='natural', extrapolate='extrapolate')
+
+    def profile_fn(s_norm: np.ndarray, **_params) -> np.ndarray:
+        """Evaluate turning-angle profile at normalized arc-length s ∈ [0, 1]."""
+        return np.asarray(cs(s_norm), dtype=float)
+
+    def fit_fn(_s_norm: np.ndarray, _dtheta: np.ndarray) -> dict:
+        """No-op: profile is fully specified by the input nodes."""
+        return {}
+
+    return profile_fn, fit_fn

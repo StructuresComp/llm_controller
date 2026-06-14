@@ -33,219 +33,192 @@ All commands run from the project root with the venv active.
 
 ## Adding a new benchmark case
 
-The benchmark system has two layers. **Adding a case = one new file in `cases/`. Nothing else changes.**
+**Adding a case = one new file in `src/benchmarks/cases/`. Everything is self-contained.**
+
+The directory structure:
 
 ```
 src/benchmarks/
-├── shapes/   — geometric profile definitions (NOT registered, no BenchmarkCase)
-│   ├── profile_C.py       profile_c(s_norm, total_turn), fit_c(...)
-│   ├── profile_S.py       profile_s(s_norm, amplitude), fit_s(...)
-│   ├── profile_U.py       profile_u(s_norm, total_turn), fit_u(...)
-│   ├── profile_L.py       profile_l(s_norm, total_turn, turn_at), fit_l(...)
-│   ├── profile_tip_reach.py  tip_reach_loss(nodes, target_x, target_y, rod_length)
-│   └── profile_custom.py  make_profile(kappa_fn) → (profile_fn, fit_fn)
-└── cases/    — fully specified experiments (auto-discovered, self-registering)
-    ├── beam_C.py          imports profile_C, registers "C"
-    ├── beam_S.py          imports profile_S, registers "S"
-    ├── beam_U.py          imports profile_U, registers "U"
-    ├── beam_L.py          imports profile_L, registers "L"
-    ├── beam_snake_L.py    imports profile_tip_reach, registers "snake_L"
-    └── beam_tip_reach.py  imports profile_tip_reach, registers "tip_reach"
+├── loss_beam/              — reusable loss functions and profiles
+│   ├── profile_C.py        profile_c(s) — constant curvature
+│   ├── profile_S.py        profile_s(s) — S-curve
+│   ├── profile_tip_reach.py  tip_reach_loss(nodes, x_target, y_target, rod_length)
+│   └── profile_custom.py   make_profile(kappa_fn) — wrap any curvature function
+├── profile_fitting.py      — shared helpers: build_ideal_from_edge_profile, profile_loss
+├── case.py                 — BenchmarkCase base class
+├── __init__.py             — registry: register(), get_benchmark()
+└── cases/                  — your benchmark cases (auto-discovered)
+    ├── beam_C.py           ← new case goes here
+    ├── beam_S.py
+    └── beam_tip_reach.py
 ```
 
-**`shapes/`** — pure geometry. A profile file exports two functions:
-- `profile_fn(s_norm, **params) → ndarray` — ideal turning angle at each arc-length position
-- `fit_fn(s_norm, dtheta) → dict` — fit free parameters to observed turning angles
+### Part 1: Define the loss function
 
-`shapes/` files are **not** imported by `__init__.py` and do **not** call `register()`.
+A loss function takes observable nodes and returns `{error_percent, diagnostics}`. All cases implement `loss_fn(nodes, ps=None, q_ref=None) -> dict`.
 
-**`cases/`** — full experiments. A case file:
-1. Imports profile functions from `shapes/`
-2. Defines a `BenchmarkCase` subclass with `name`, `physics_type`, `target_description`, `loss_fn`, `reference_fn`
-3. Calls `register(MyCase())` at module level
-4. Has a `main()` standalone visualizer
+**Three measurement approaches:**
 
-`__init__.py` auto-discovers every `*.py` in `cases/` and imports them. Nothing else needs to change when you add a file.
+1. **Shape-based loss** (measure how close observed shape is to ideal):
 
-### Template — profile-based case (C, S, U, L, or a new shape)
+   To compute error, you need a **profile**: a function that returns turning angles (unitless curvature, dimensionless) vs. normalized arc-length s ∈ [0, 1].
 
-**Step 1** — add `src/benchmarks/shapes/profile_myshape.py`:
+   **Way 1: Provide a curvature function (or use existing)**
 
+   Write a simple function that encodes your target shape. Example: constant curvature (circular arc):
+   ```python
+   def profile_fn(s, kappa=1.0):
+       return kappa * s  # unitless turning angle at arc-length s
+   ```
+
+   Or import an existing profile:
+   ```python
+   from src.benchmarks.loss_beam.profile_C import profile_c, fit_c
+   ```
+
+   Create new profiles in `src/benchmarks/loss_beam/` following the pattern in `profile_C.py`, `profile_S.py`, etc. (each exports `profile_fn` and `fit_fn`).
+
+   **Way 2: Extract profile from ideal nodes**
+
+   If you have ideal (x, y) nodes defining your target shape, use `make_profile_from_nodes()` to automatically extract the turning-angle profile:
+
+   See **`beam_sine.py`** for a complete worked example. In brief:
+   ```python
+   from src.benchmarks.profile_fitting import make_profile_from_nodes, profile_loss
+
+   ideal_nodes = [(0, 0), (0.01, 0.015), (0.02, 0.025), ...]  # your target shape
+   profile_fn, fit_fn = make_profile_from_nodes(ideal_nodes)
+
+   def loss_fn(self, nodes, ps=None, q_ref=None):
+       return profile_loss(nodes, profile_fn, fit_fn)
+   ```
+
+   Then register your case and it auto-discovers in the registry.
+
+2. **Tip/nodal loss** (measure distance to target point(s)):
+
+   Define a simple loss function. Example: measure distance from tip to target:
+   ```python
+   def loss_fn(self, nodes, ps=None, q_ref=None):
+       tip_x, tip_y = nodes[-1]
+       distance = ((tip_x - 0.05)**2 + (tip_y + 0.11)**2) ** 0.5
+       return {"error_percent": min(distance * 100, 100.0), "diagnostics": f"tip at ({tip_x:.3f}, {tip_y:.3f})"}
+   ```
+
+   You can extend this to penalize multiple nodes. Or use the pre-built function:
+   ```python
+   from src.benchmarks.loss_beam.profile_tip_reach import tip_reach_loss
+
+   def loss_fn(self, nodes, ps=None, q_ref=None):
+       return tip_reach_loss(nodes, target_x=0.05, target_y=-0.11, rod_length=0.10)
+   ```
+
+3. **Combined loss** (blend shape error with tip/nodal error):
+
+   Compute both, blend with a weight:
+   ```python
+   def loss_fn(self, nodes, ps=None, q_ref=None):
+       shape_error = profile_loss(nodes, profile_c, fit_c)["error_percent"]
+       tip_error = tip_reach_loss(nodes, target_x=0.05, target_y=-0.11, rod_length=0.10)["error_percent"]
+       alpha = 0.7  # shape weight
+       combined_error = alpha * shape_error + (1 - alpha) * tip_error
+       return {"error_percent": combined_error, "diagnostics": "blended shape + tip loss"}
+   ```
+
+### Part 2: Define configs and register
+
+Create one file in `src/benchmarks/cases/beam_mycase.py`. Look at **`beam_C.py`**, **`beam_S.py`**, or **`beam_sine.py`** for complete working examples.
+
+**Step 1: Write target_description**
+
+This description is passed directly to the LLM prompt. Make it clear and actionable:
 ```python
-import numpy as np
-
-def profile_myshape(s_norm: np.ndarray, param: float = 1.0) -> np.ndarray:
-    """Ideal turning angle at normalised arc-length s."""
-    return param * s_norm   # example: linear ramp = constant curvature
-
-def fit_myshape(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
-    """Fit free params to observed turning angles."""
-    denom = float(np.dot(s_norm, s_norm)) + 1e-12
-    return {"param": float(np.dot(s_norm, dtheta) / denom)}
-```
-
-**Step 2** — add `src/benchmarks/cases/beam_myshape.py`:
-
-```python
-import numpy as np
 from src.benchmarks import BenchmarkCase, register
-from src.benchmarks.profile_fitting import build_ideal_from_edge_profile, profile_loss
-from src.benchmarks.shapes.profile_myshape import profile_myshape, fit_myshape
-from src.visualization.run_time_visual import plot_shape, plot_comparison
 
-class MyShape(BenchmarkCase):
-    name               = "myshape"          # must match --target argument
-    physics_type       = "beam"             # "beam" or "rod"
-    target_description = "Describe the target shape in plain English for the LLM."
-    success_threshold  = 0.05               # error_percent below which task is solved
-
-    def reference_fn(self, x0=0.0, y0=0.0, theta=0.0) -> list:
-        return build_ideal_from_edge_profile(
-            profile_myshape, n=9, arc_length=0.10,
-            x0=x0, y0=y0, theta=theta, param=1.0,
-        )
-
-    def loss_fn(self, nodes, ps=None, q_ref=None) -> dict:
-        return profile_loss(nodes, profile_myshape, fit_myshape)
-
-register(MyShape())
-
-TEST_CONFIG = None
-
-def main():
-    case = MyShape()
-    ref  = case.reference_fn()
-    if TEST_CONFIG is None:
-        plot_shape(ref, name="myshape (reference)")
-    else:
-        result = case.loss_fn(TEST_CONFIG)
-        print(f"error: {result['error_percent']:.2f}%  |  {result['diagnostics']}")
-        plot_comparison(ref, TEST_CONFIG, result, name="myshape")
-
-if __name__ == "__main__":
-    main()
+class MyCase(BenchmarkCase):
+    name = "mycase"                # registry key; use with: python3 cli.py --target mycase
+    physics_type = "beam"          # "beam" or "rod"
+    target_description = (
+        "Bend the beam into a smooth sine wave: starting straight, "
+        "gradually curving up then down, returning to straight orientation."
+    )
 ```
 
-### Template — tip-reach / navigation case (no reference shape)
+**Step 2: Define case-specific configs (optional)**
 
-For cases where success is defined by a goal position rather than a curvature profile, skip `shapes/` entirely and implement `loss_fn` directly in the case file. Use `tip_reach_loss` from `profile_tip_reach.py` if the metric is just Euclidean tip distance:
-
+You can override any setting from `src/core/config.py` as class attributes:
 ```python
-from src.benchmarks import BenchmarkCase, register
-from src.benchmarks.shapes.profile_tip_reach import tip_reach_loss
+    # Optional: remove these if using defaults
+    walls = [{"P0": [0, -0.12], "P1": [0.1, -0.12]}]  # case-specific walls
+    rod_length = 0.12              # material length (m)
+    nv = 25                        # number of vertices (mesh resolution)
+    rho = 0.001                    # material density (kg/m)
+    friction = True                # enable friction on walls
+    success_threshold = 0.05       # error_percent below which task is solved
+```
 
-TARGET_X, TARGET_Y = 0.05, -0.10
+See `src/core/config.py` for the complete list of available parameters.
 
-class MyNavCase(BenchmarkCase):
-    name               = "my_nav"
-    physics_type       = "beam"
-    target_description = "Navigate the tip to (0.05, -0.10) m."
+**Step 3: Implement loss_fn and reference_fn**
 
-    # Case-specific walls (optional — omit if no walls)
-    walls = [{"P0": [x0, y0], "P1": [x1, y1]}, ...]
-
+Choose your loss function from Part 1:
+```python
+    def loss_fn(self, nodes, ps=None, q_ref=None):
+        return profile_loss(nodes, profile_c, fit_c)
+    
     def reference_fn(self, x0=0.0, y0=0.0, theta=0.0):
-        return None   # no reference shape for goal-reaching tasks
-
-    def loss_fn(self, nodes, ps=None, q_ref=None) -> dict:
-        rod_length = ps.rod_length if ps is not None else 0.1
-        return tip_reach_loss(nodes, TARGET_X, TARGET_Y, rod_length)
-
-register(MyNavCase())
+        return build_ideal_from_edge_profile(profile_c, n=9, arc_length=0.10,
+                                            x0=x0, y0=y0, theta=theta)
 ```
 
-`test_all_shapes` automatically skips the round-trip check for cases where `reference_fn()` returns `None`.
+**Step 4: Register**
+
+```python
+register(MyCase())
+```
+
+**Step 5: Test and run**
+
+From the project root:
+```bash
+# Run from CLI
+python3 cli.py --target mycase
+
+# Or test standalone
+python -m src.benchmarks.cases.beam_mycase
+```
+
+The benchmark system auto-discovers every `*.py` in `cases/` — nothing else needs to change.
 
 ---
 
 ## Custom controller geometry via `controlled_nodes`
 
-`discreteBeam` has a concept of **controlled nodes** — node indices that are always
-held fixed and are never subject to wall contact logic.
+**Controlled nodes** are node indices that are always held fixed and never subject to wall contact logic.
 
-**Default behaviour** (set automatically by `discreteBeam`):
+**Default behaviour** (computed automatically in `make_physical_system()`):
 
 | Scenario | Controlled nodes |
 |---|---|
 | `walls` is non-empty | `[0, 1]` — only the driven end |
 | `walls == []` | `[0, 1, nv-2, nv-1]` — driven end **and** the tip |
 
-The no-wall case clamps the tip so that moving node 0 produces genuine elastic
-bending rather than rigid-body translation under gravity.
+The no-wall case clamps the tip so that moving node 0 produces genuine elastic bending rather than rigid-body translation under gravity.
+
+**To use custom `controlled_nodes` in a benchmark case:**
+
+1. Add it as a class attribute in your benchmark case:
+   ```python
+   class MyCase(BenchmarkCase):
+       controlled_nodes = [0, 1, 5, 6]  # your custom always-fixed nodes
+   ```
+
+2. Modify `src/models/physical_system.py` in the `make_physical_system()` function to read and use the case-specific value instead of computing it automatically.
 
 **What `controlled_nodes` means internally:**
 - Their DOFs are always in `fixed_index` — the Newton solver never adjusts them.
 - The wall contact loop (`apply_wall_contacts`) skips them entirely.
-- `fixed_index` is derived as `[2*n, 2*n+1 for n in controlled_nodes]` plus any
-  dynamically contacted wall nodes.
-
-**If you extend the physics tool** and need a different set of always-fixed nodes,
-pass `controlled_nodes` explicitly. Validation is deliberately omitted — if a
-controlled node overlaps with a wall, that is treated as a configuration error
-and is the caller's responsibility.
-
----
-
-## Folder structure
-
-```
-llm_controller/
-│
-├── cli.py                        Entry point — builds the graph, runs the loop
-├── src/
-│   │
-│   ├── core/
-│   │   ├── config.py             All tunable settings (model, NV, wall depth, etc.)
-│   │   └── paths.py              Project-root-relative paths for data/logs
-│   │
-│   ├── models/
-│   │   ├── physical_system.py    BeamPhysicalSystem + RodPhysicalSystem classes
-│   │   └── state_llm_control.py  ControllerState TypedDict — shared across all agents
-│   │
-│   ├── agents/
-│   │   ├── orchestrator_agent.py LLM brain: reads current shape, decides next BC
-│   │   ├── programmer_agent.py   Deterministic: runs the physics sim, updates state
-│   │   └── evaluator_agent.py    Deterministic: looks up benchmark, computes loss
-│   │
-│   ├── workflows/
-│   │   └── workflow.py           Wires agents into a LangGraph control loop
-│   │
-│   ├── llm/
-│   │   └── llm.py                call_llm() and call_llm_with_tool() — provider-agnostic
-│   │
-│   ├── tools/
-│   │   ├── Discrete_Elastic_Beams.py  discreteBeam() — 2D beam physics simulator
-│   │   └── Discrete_Elastic_Rods.py   discreteRod()  — 3D rod physics (in progress)
-│   │
-│   ├── benchmarks/
-│   │   ├── case.py               BenchmarkCase ABC — base class for all cases
-│   │   ├── __init__.py           Registry: register(), get_benchmark(), auto-discovery
-│   │   ├── profile_fitting.py    Shared θ-profile math: build_ideal_from_edge_profile, profile_loss
-│   │   │                         build_ideal_from_edge_profile
-│   │   ├── shapes/               Geometric profile definitions — NOT registered
-│   │   │   ├── profile_C.py      profile_c, fit_c — constant curvature (circular arc)
-│   │   │   ├── profile_S.py      profile_s, fit_s — full-sine (S-curve)
-│   │   │   ├── profile_U.py      profile_u, fit_u — linear ramp to π (semicircle)
-│   │   │   ├── profile_L.py      profile_l, fit_l — step function (straight + sharp bend)
-│   │   │   ├── profile_tip_reach.py  tip_reach_loss() — Euclidean tip distance
-│   │   │   └── profile_custom.py make_profile(kappa_fn) — wrap any user function
-│   │   └── cases/                Fully specified experiments — auto-discovered, registered
-│   │       ├── beam_C.py         C-shape case (imports profile_C)
-│   │       ├── beam_S.py         S-shape case (imports profile_S)
-│   │       ├── beam_U.py         U-shape case (imports profile_U)
-│   │       ├── beam_L.py         L-shape case (imports profile_L)
-│   │       ├── beam_snake_L.py   L-tube navigation (imports profile_tip_reach)
-│   │       └── beam_tip_reach.py Free-space tip reach (imports profile_tip_reach)
-│   │
-│   ├── visualization/
-│   │   └── run_time_visual.py    plot_shape(), plot_comparison(), plot_grid()
-│   │
-│   └── tests/
-│       ├── test_all_shapes.py    Round-trip check: reference_fn → loss_fn ≈ 0%
-│       ├── test_shape_checker.py Profile-fitting tests + perturbation checks
-│       ├── test_beam_chaining.py Physics tool integration test
-│       └── test_beam_FDM.py      Finite-difference validation of beam physics
-```
+- `fixed_index` is derived as `[2*n, 2*n+1 for n in controlled_nodes]` plus any dynamically contacted wall nodes.
 
 ---
 
@@ -292,27 +265,15 @@ cli.py
 - A convergence judgment (recorded separately as a research measurement)
 
 **Key config knobs** (`src/core/config.py`):
+
 | Flag | What it does |
 |---|---|
-| `RUN_NAME` | Stem for `logs/<RUN_NAME>.json` + `logs/<RUN_NAME>.log`. Empty = auto `run_<timestamp>_<pid>` |
-| `MODEL` | Which LLM to use |
+| `RUN_NAME` | Stem for `logs/<RUN_NAME>.jsonl` (streaming trajectory). Empty = auto `run_<timestamp>_<pid>` |
+| `MODEL` | Which LLM to use (e.g., `"claude-haiku-4-5"`, `"gpt-4o"`, `"qwen2.5:14b"`) |
 | `ORCHESTRATOR_MODE` | `"plan"` (LLM writes strategy first) or `"myopic"` (reactive only) |
 | `OBSERVATION_LEVEL` | `"positions"` (raw x,y) or `"geometric"` (angles + curvature) |
-| `N_PARTIAL` | How many nodes the LLM sees |
-| `MAX_ITERATIONS` | Hard stop |
-| `WALLS` | Wall geometry (floor depth also overridable with `--H`) |
+| `N_PARTIAL` | How many observable nodes the LLM sees |
+| `MAX_ITERATIONS` | Hard stop on control cycles |
+| `WALLS` | Wall geometry (list of `{P0, P1}` segments). CLI override: `--H` for wall depth |
 
-**Config overlay files** let you vary settings per-run without touching `config.py`. The overlay file is plain Python — only define what you want to change:
-
-```python
-# experiments/qwen_myopic_U.py
-MODEL             = "qwen2.5:14b"
-ORCHESTRATOR_MODE = "myopic"
-RUN_NAME          = "qwen_myopic_U"
-```
-
-```bash
-python3 cli.py --target U --config experiments/qwen_myopic_U.py
-```
-
-This is the intended pattern for the evaluation harness (TODO §5): spawn one subprocess per `(shape, model, mode)` combination, each with its own overlay file and `RUN_NAME`.
+Any of these can be overridden at the benchmark case level (see Part 2).

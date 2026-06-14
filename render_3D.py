@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Visualise a finished llm_controller run in mechview.
+Render a finished llm_controller run in interactive 3D (mechview).
 
 Reads a run JSON from logs/, converts it to mechview format, and drops
 index.html + data.js into viz/ (VISUALIZATION_DIR) ready to open in Chrome.
 
 Usage:
-    python3 visualize.py                      # latest run in logs/
-    python3 visualize.py logs/run_123.json    # specific run
+    python3 render_3D.py                      # latest run in logs/
+    python3 render_3D.py logs/run_123.json    # specific run
 """
 
 import importlib.resources

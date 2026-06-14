@@ -14,7 +14,7 @@ reliably, or does the agent oscillate, stagnate, or fail to recognize infeasibil
 This document covers task definitions, losses, metrics, and the experimental protocol.
 
 **Implementation status:**
-- Beams (2D, wall contact): C, U, S, L — implemented in `src/benchmarks/shapes/`
+- Beams (2D, wall contact): C, U, S, L — implemented in `src/benchmarks/cases/`
 - Navigation cases (snake, T): designed, not yet implemented
 - Rods (3D): in progress
 
@@ -414,7 +414,7 @@ The beam cannot negotiate the bend.
 **Behavioral use:** Simplest navigation task. One decision point (commit to the bend),
 one target. Tests whether the LLM plans globally rather than correcting locally.
 
-**Implementation:** `src/benchmarks/shapes/beam_snake.py` — Class 3, no `reference_fn`.
+**Implementation:** `src/benchmarks/cases/beam_snake.py` — Class 3, no `reference_fn`.
 
 ---
 

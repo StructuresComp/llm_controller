@@ -23,7 +23,7 @@ this is the only reliable way to get machine-readable output from an LLM.
 
 The benchmark system has two layers:
 
-**`src/benchmarks/shapes/`** — geometric profile definitions. Pure math, no `BenchmarkCase`, no `register()`.
+**`src/benchmarks/loss_beam/`** — reusable loss functions and profile definitions. Pure math, no `BenchmarkCase`, no `register()`.
 Each profile file exports `profile_fn(s_norm, **params)` and `fit_fn(s_norm, dtheta)`.
 `profile_tip_reach.py` exports `tip_reach_loss(nodes, target_x, target_y, rod_length)`.
 
@@ -72,7 +72,7 @@ Every case file has a `main()` and a module-level `TEST_CONFIG = None`.
 
 **`benchmarks/__init__.py` is closed.** Case files are auto-discovered from `cases/`. Never add an explicit import line there.
 
-**Adding a new case = one new file in `src/benchmarks/cases/`. Optionally a matching profile file in `src/benchmarks/shapes/` if the shape needs its own `θ*(s)` definition. Nothing else changes.**
+**Adding a new case = one new file in `src/benchmarks/cases/`. Optionally a matching profile file in `src/benchmarks/loss_beam/` if the shape needs its own `θ*(s)` definition. Nothing else changes.**
 
 ---
 
@@ -347,7 +347,7 @@ Each benchmark is a subclass of `BenchmarkCase` (ABC in `src/benchmarks/__init__
 Add a new function here only when a real case needs it — never speculatively.
 
 **Adding a new case:** create one file in `src/benchmarks/cases/`. It self-registers.
-Optionally add a profile file in `src/benchmarks/shapes/` if the shape needs its own `θ*(s)`.
+Optionally add a profile file in `src/benchmarks/loss_beam/` if the shape needs its own `θ*(s)`.
 Nothing else changes — `__init__.py` auto-discovers all `*.py` files in `cases/`.
 
 **Standalone visualizer:** `python -m src.benchmarks.cases.beam_C`

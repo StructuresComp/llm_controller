@@ -9,7 +9,7 @@ import numpy as np
 
 from src.benchmarks import BenchmarkCase, register
 from src.benchmarks.profile_fitting import build_ideal_from_edge_profile, profile_loss
-from src.benchmarks.shapes.profile_U import profile_u, fit_u
+from src.benchmarks.loss_beam.profile_U import profile_u, fit_u
 from src.visualization.run_time_visual import plot_shape, plot_comparison
 
 

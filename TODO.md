@@ -7,7 +7,7 @@ Work top-to-bottom within each section. Later sections depend on earlier ones.
 ### 1a. `config.py` ✓
 - [x] `WALLS = [...]` list replaces scalar `WALL_H` — done
 
-### 1b. New benchmark: `src/benchmarks/shapes/beam_snake_L.py` ✓
+### 1b. New benchmark: `src/benchmarks/cases/beam_snake_L.py` ✓
 - [x] `SnakeLCase`: L-tube navigation, tip-reach loss to `(0.05, -0.11)`
 - [x] `target_description` describes tube geometry, corner, strategy hint
 - [x] `loss_fn`: Euclidean tip distance normalised by rod length

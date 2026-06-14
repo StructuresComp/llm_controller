@@ -13,10 +13,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from src.benchmarks.profile_fitting import build_ideal_from_edge_profile, profile_loss
-from src.benchmarks.shapes.profile_C import profile_c as _profile_c, fit_c as _fit_c
-from src.benchmarks.shapes.profile_U import profile_u as _profile_u, fit_u as _fit_u
-from src.benchmarks.shapes.profile_S import profile_s as _profile_s, fit_s as _fit_s
-from src.benchmarks.shapes.profile_L import profile_l as _profile_l, fit_l as _fit_l
+from src.benchmarks.loss_beam.profile_C import profile_c as _profile_c, fit_c as _fit_c
+from src.benchmarks.loss_beam.profile_U import profile_u as _profile_u, fit_u as _fit_u
+from src.benchmarks.loss_beam.profile_S import profile_s as _profile_s, fit_s as _fit_s
+from src.benchmarks.loss_beam.profile_L import profile_l as _profile_l, fit_l as _fit_l
 
 ARC_LENGTH = 0.10
 

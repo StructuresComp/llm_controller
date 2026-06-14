@@ -7,7 +7,7 @@ Right now, it only supports beams (2D DLO). Khalid is working on the rods (3D DL
 Recommendation for students to get up and running:
 - Follow the instructions to install it.
 - Run this case ``python3 cli.py --target C --H 0.15`` where the LLM will try to bend the DLO against a wall at ``y=-0.15`` and give it a C-shape.
-- TO visualize it, run ``python3 visualize.py`` and open ``viz/index.html`` (Click play in your browser)
+- To visualize it, run ``python3 render_3D.py`` and open ``viz/index.html`` (Click play in your browser)
 
 **Research question:** How well can LLMs (and later VLMs) perform as controllers in physical systems they cannot directly observe or manipulate?
 
@@ -77,23 +77,36 @@ Set `PLOT_IMAGE = 0` in `src/core/config.py` for a headless run (no matplotlib w
 
 ### Visualize a run
 
+**Option 1: Interactive 3D rendering (mechview)**
+
 ```bash
-python3 visualize.py             # latest run in logs/
-python3 visualize.py logs/run_123.json   # specific run
+python3 render_3D.py             # latest run in logs/
+python3 render_3D.py logs/run_123.jsonl   # specific run
 ```
 
 Writes `viz/index.html` + `viz/data.js`. Open `viz/index.html` in Chrome.
 
-### Run a benchmark standalone
-
-Each shape in `src/benchmarks/shapes/` has a built-in visualizer. Run any of them directly to inspect its reference geometry and loss function without launching the full controller:
+**Option 2: Analysis plots (error curves, trajectories)**
 
 ```bash
-python3 -m src.benchmarks.shapes.beam_C
-python3 -m src.benchmarks.shapes.beam_U
-python3 -m src.benchmarks.shapes.beam_S
-python3 -m src.benchmarks.shapes.beam_L
-python3 -m src.benchmarks.shapes.beam_snake_L
+python3 analysis_plots.py --all              # error curve, trajectories, shapes
+python3 analysis_plots.py --iter 5           # detailed view of iteration 5
+python3 analysis_plots.py --animate          # play full trajectory animation
+```
+
+See `analysis_plots.py --help` for all options.
+
+### Run a benchmark standalone
+
+Each benchmark case in `src/benchmarks/cases/` has a built-in standalone test. Run any of them directly to inspect its reference geometry and loss function without launching the full controller:
+
+```bash
+python3 -m src.benchmarks.cases.beam_C
+python3 -m src.benchmarks.cases.beam_U
+python3 -m src.benchmarks.cases.beam_S
+python3 -m src.benchmarks.cases.beam_L
+python3 -m src.benchmarks.cases.beam_sine
+python3 -m src.benchmarks.cases.beam_snake_L
 ```
 
 To also evaluate a real configuration, set `TEST_CONFIG` at the top of the shape file to a list of `(x, y)` tuples (one per observable node) and re-run. It will overlay the actual shape on the reference and print the loss.
@@ -160,7 +173,8 @@ For Anthropic: set `ANTHROPIC_API_KEY` in `.env`.
 ```
 llm_controller/
 ├── cli.py                               # Entry point: python3 cli.py --target C
-├── visualize.py                         # Viewer: python3 visualize.py
+├── render_3D.py                         # 3D viewer: python3 render_3D.py
+├── analysis_plots.py                    # Analysis plots: python3 analysis_plots.py --all
 ├── requirements.txt
 ├── docs/
 │   ├── cases.md                         # Task definitions, losses, metrics
@@ -190,12 +204,23 @@ llm_controller/
     │
     ├── benchmarks/
     │   ├── __init__.py                  # BenchmarkCase ABC + register() + get_benchmark()
-    │   ├── losses.py                    # Shared loss primitives — closed
-    │   └── shapes/
+    │   ├── case.py                      # BenchmarkCase base class
+    │   ├── profile_fitting.py           # Shared profile math: build_ideal_from_edge_profile, profile_loss
+    │   ├── loss_beam/                   # Reusable profiles and loss functions
+    │   │   ├── profile_C.py             # Constant curvature (circular arc)
+    │   │   ├── profile_S.py             # S-curve (full sine)
+    │   │   ├── profile_U.py             # Semicircle
+    │   │   ├── profile_L.py             # L-shape (step function)
+    │   │   ├── profile_tip_reach.py     # Tip-reach loss function
+    │   │   └── profile_custom.py        # Wrap custom curvature functions
+    │   └── cases/                       # Benchmark cases (auto-discovered, auto-registered)
     │       ├── beam_C.py
-    │       ├── beam_U.py
     │       ├── beam_S.py
-    │       └── beam_L.py
+    │       ├── beam_U.py
+    │       ├── beam_L.py
+    │       ├── beam_sine.py
+    │       ├── beam_snake_L.py
+    │       └── beam_tip_reach.py
     │
     ├── llm/
     │   └── llm.py                       # Thin adapter over llm_wrapper; handles logging
@@ -218,7 +243,7 @@ Every run writes to `logs/`. The stem is `RUN_NAME` if set, otherwise `run_<time
 
 | File | Description |
 |---|---|
-| `logs/<stem>.json` | Full run state: all configurations, BC history, iteration log |
+| `logs/<stem>.jsonl` | Streaming trajectory: one line per iteration (DOF snapshot, BC, error, timestamp, orchestrator prompt/reasoning) |
 | `logs/<stem>.log` | Every LLM prompt and response (when `LOG_LLM_CALLS = True`) |
 
 Set `RUN_NAME` in your config overlay so parallel runs produce paired, identifiable files:
@@ -230,10 +255,10 @@ RUN_NAME          = "qwen_plan_C"
 ```
 ```bash
 python3 cli.py --target C --config experiments/qwen_plan_C.py
-# → logs/qwen_plan_C.json + logs/qwen_plan_C.log
+# → logs/qwen_plan_C.jsonl + logs/qwen_plan_C.log
 ```
 
-`visualize.py` reads the run JSON and writes:
+`render_3D.py` reads the run JSONL and writes:
 
 | File | Description |
 |---|---|
@@ -250,7 +275,9 @@ Provider implementations live in the [`llm_wrapper`](https://github.com/agentic-
 
 ## Visualization
 
-Post-run 3D animation is powered by [`mechview`](https://github.com/StructuresComp/mechview) (installed via pip). `visualize.py` calls `src/visualization/mechview_export.py` to normalise coordinates and write `data.js`, then copies `index.html` from the installed mechview package into `viz/`.
+**3D interactive rendering:** Post-run 3D animation is powered by [`mechview`](https://github.com/StructuresComp/mechview) (installed via pip). `render_3D.py` calls `src/visualization/mechview_export.py` to normalise coordinates and write `data.js`, then copies `index.html` from the installed mechview package into `viz/`.
+
+**2D analysis plots:** `analysis_plots.py` reads the streaming JSONL trajectory file and generates error curves, trajectory animations, and iteration-by-iteration shape evolution. Use this to inspect control decisions and convergence behavior.
 
 ---
 
@@ -290,15 +317,17 @@ The tip nodes (nv−2 and nv−1) are **also fixed** throughout the run. Without
 
 ## Benchmark System
 
-Each benchmark is a subclass of `BenchmarkCase` in `src/benchmarks/shapes/`. Adding a new case = one new file. Nothing else changes.
+Each benchmark is a subclass of `BenchmarkCase` in `src/benchmarks/cases/`. Adding a new case = one new file in `cases/`. Nothing else changes.
 
 - `loss_fn(nodes, ps, q_ref) -> dict` — deterministic; returns at minimum `{error_percent, diagnostics}`
 - `reference_fn(x0, y0, theta) -> list` — ideal target shape anchored at node 0's pose
 - `success_threshold` — `error_percent` below which the task is solved
 
+See `docs/CONTRIBUTING.md` for a complete guide to adding new benchmark cases.
+
 Standalone visualiser for a single shape:
 ```bash
-python3 -m src.benchmarks.shapes.beam_C
+python3 -m src.benchmarks.cases.beam_C
 ```
 
 Full registry validation:
