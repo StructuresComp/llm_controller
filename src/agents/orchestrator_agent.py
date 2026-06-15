@@ -343,6 +343,7 @@ def decision_node(state: ControllerState) -> dict:
     updates: dict = {
         "decision":  decision,
         "converged": convergence["converged"],
+        "convergence_reason": convergence["reason"],  # recorded per iteration for stability analysis
         "orchestrator_prompt": prompt,  # Store for JSONL traceability
     }
 

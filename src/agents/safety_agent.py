@@ -126,7 +126,7 @@ def safety_node(state: ControllerState) -> dict:
         f"{'; '.join(violations)}. "
         f"Keep nodes 0 and 1 at least {tol:.4f} m from all walls and reissue the BC."
     )
-    return {"error": msg}
+    return {"error": msg, "safety_rejections": state.get("safety_rejections", 0) + 1}
 
 
 # ---------------------------------------------------------------------------

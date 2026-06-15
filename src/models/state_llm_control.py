@@ -55,6 +55,8 @@ class ControllerState(TypedDict):
     # ============ TARGET & CONVERGENCE
     target_shape: str    # "C", "U", "S", etc. — set from CLI --target
     converged:    bool
+    convergence_reason: str   # LLM's one-sentence convergence rationale (recorded per iteration)
+    safety_rejections:  int   # safety rejections accumulated for the current iteration (reset each cycle)
 
     # ============ ORCHESTRATOR
     # decision is a validated dict produced by call_llm_with_tool — never a raw string.
@@ -96,6 +98,8 @@ def initial_controller_state(
         "config_writer":     config_writer,
         "target_shape":      target_shape,
         "converged":         False,
+        "convergence_reason": "",
+        "safety_rejections":  0,
         "decision":          {},
         "plan":              "",
         "result":            "",

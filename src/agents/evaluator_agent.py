@@ -80,6 +80,12 @@ def evaluator_node(state: ControllerState) -> dict:
     iteration_num = len(state.get("iteration_log", []))  # programmer already added entry
     orchestrator_prompt = state.get("orchestrator_prompt", None)
 
+    # Per-iteration diagnostic signals for the stability analysis (LLM_Stability bridge).
+    solved_flag = bool(result.get("solved", False))
+    converged   = bool(state.get("converged", False))
+    reason      = state.get("convergence_reason", "")
+    safety_rej  = int(state.get("safety_rejections", 0))
+
     if config_writer and q_history:
         for idx, q in enumerate(q_history):
             snapshot_data = {
@@ -88,13 +94,20 @@ def evaluator_node(state: ControllerState) -> dict:
                 "q": q,
                 "error_percent": pct,
                 "timestamp": ctime_current,
+                "solved": solved_flag,
+                "converged": converged,
+                "safety_rejections": safety_rej,
             }
-            # Add prompt only to first snapshot of this iteration
-            if idx == 0 and orchestrator_prompt:
-                snapshot_data["orchestrator_prompt"] = orchestrator_prompt
+            # Add prompt + convergence reason only to the first snapshot of this iteration.
+            if idx == 0:
+                if orchestrator_prompt:
+                    snapshot_data["orchestrator_prompt"] = orchestrator_prompt
+                if reason:
+                    snapshot_data["convergence_reason"] = reason
             config_writer.append_snapshot(**snapshot_data)
 
-    return {"eval_result": result}
+    # Reset the safety-rejection counter for the next iteration.
+    return {"eval_result": result, "safety_rejections": 0}
 
 
 # ---------------------------------------------------------------------------
