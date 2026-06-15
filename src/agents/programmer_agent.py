@@ -116,6 +116,9 @@ def programmer_node(state: ControllerState) -> dict:
 
     q_new = result["q_new"]
     q_history = result.get("q_history", [q_new])
+    reaction_force = result.get("reactionForce")
+    contact_x = result.get("cx")
+    contact_y = result.get("cy")
 
     # --- Update continuity fields ---
     bc_current = [decision["x0"], decision["y0"], decision["theta"]]
@@ -146,6 +149,9 @@ def programmer_node(state: ControllerState) -> dict:
         "q_history":         q_history,
         "shape_history":     shape_history,
         "bc_history":        bc_history,
+        "reaction_force":    reaction_force,
+        "contact_x":         contact_x,
+        "contact_y":         contact_y,
         "result":            report,
         "iteration_log":     state["iteration_log"] + [iteration_entry],
         "error":             None,

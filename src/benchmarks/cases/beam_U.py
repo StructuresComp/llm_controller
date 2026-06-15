@@ -21,6 +21,11 @@ class UShape(BenchmarkCase):
         "curvature sign throughout, endpoints much closer together than arc "
         "length, tip in contact with the wall."
     )
+    loss_description   = (
+        "Error is the RMS deviation of the beam's curvature profile from a perfect semicircular arc. "
+        "0% error means the beam forms a perfect semicircle with total turning angle π. "
+        "Deviation from constant curvature or incorrect turning angle increases error."
+    )
     success_threshold  = 0.05
 
     def reference_fn(self, x0: float = 0.0, y0: float = 0.0, theta: float = 0.0) -> list:

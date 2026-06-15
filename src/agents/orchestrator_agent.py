@@ -36,7 +36,7 @@
 from langgraph.graph import END, StateGraph
 
 from src.core import config
-from src.core.observation import describe_walls, describe_nodes, describe_history
+from src.core.prompt_builder import build_decision_prompt, build_plan_prompt
 from src.llm.llm import call_llm, call_llm_with_tool
 from src.models.state_llm_control import ControllerState
 
@@ -109,111 +109,21 @@ _PLAN_SYSTEM = (
     "the desired shape."
 )
 
-_PLAN_PROMPT = """\
-ROBOTIC ARM CONTROL SETUP:
-
-PHYSICAL SYSTEM:
-- Elastic beam (length L = {rod_length:.4f} m, stiffness EI = {EI:.6e})
-- One end: CLAMPED and held by the arm (node 0). YOU CONTROL THIS END.
-- Other end: FREE. Hangs under gravity. Can contact the wall.
-- Rigid wall(s): {wall_description}
-
-YOUR CONTROL INPUTS (arm degrees of freedom):
-- Position (x0, y0): where you hold node 0 (the clamped end)
-  * x0: horizontal position. x0 = 0 is centered. Positive x0 pushes right.
-  * y0: vertical position. y0 = 0 is origin. Negative y0 pushes down toward wall.
-- Angle theta: orientation of the clamped end (in radians, counter-clockwise from -Y axis)
-  * theta = 0:    beam points straight down          [tangent: 0, -1]
-  * theta = π/2:  beam points right                  [tangent: 1,  0]
-  * theta = -π/2: beam points left                   [tangent: -1, 0]
-
-TARGET: Deform the beam into a {target_shape} shape by pressing its free end against the wall and bending it.
-
-STRATEGY (3-6 steps):
-Write a step-by-step plan:
-1. First move: How will you position the arm to press the beam toward the wall?
-2. Rotation: What angle(s) will you apply to bend it in the right direction?
-3-6. Refinement: What sequence of arm moves will shape it into {target_shape}?
-
-Note: High EI means the beam resists bending — you need strong moves. Start gradually.
-"""
-
 _DECISION_SYSTEM = (
-    "You are controlling an elastic beam pressed against a wall. Your job is to issue "
-    "the next boundary condition move by calling the 'set_boundary_condition' tool.\n\n"
+    "You are controlling an elastic beam. Your job is to issue the next boundary condition "
+    "move by calling the 'set_boundary_condition' tool.\n\n"
     "TOOL SCHEMA: set_boundary_condition\n"
-    "  x0 (number): target x-position of node 0 (meters)\n"
-    "  y0 (number): target y-position of node 0 (meters)\n"
+    "  x0 (number): target x-position of clamped end (meters)\n"
+    "  y0 (number): target y-position of clamped end (meters)\n"
     "  theta (number): target angle in radians (0 = straight down, π/2 = right, -π/2 = left)\n\n"
     "Think about beam mechanics: which moves will bend it toward the target shape? "
-    "When does it contact the wall? Should you backtrack if progress stalled?"
+    "When does it contact constraints? Should you backtrack if progress stalled?"
 )
-
-_DECISION_PROMPT = """\
-ROBOTIC ARM CONTROL TASK:
-
-YOU CONTROL: Clamped end (node 0) position (x0, y0) and angle (theta, in radians).
-GOAL: Bend the free end of the beam against the wall ({wall_description}) to achieve a {target_shape} shape.
-BEAM PROPERTIES: Length L = {rod_length:.4f} m, Stiffness EI = {EI:.6e}.
-
-ANGLE CONVENTION (θ counter-clockwise from -Y axis):
-  θ =  0:    straight down  [0, -1]
-  θ =  π/2:  pointing right [1,  0]
-  θ = -π/2:  pointing left [-1,  0]
-
-{plan_section}\
-{error_section}\
-RECENT ARM MOVES ({k} most recent):
-{history_section}
-CURRENT BEAM STATE:
-{current_section}
-{eval_section}\
-NEXT MOVE:
-Decide the arm's next position (x0, y0) and angle (theta) to progress toward {target_shape}.
-
-Ask yourself:
-1. Is the free end touching the wall? If not, move y0 more negative to push it against the wall.
-2. Is the beam bending in the right direction? If not, rotate theta to correct the curve.
-3. Should you backtrack? If progress stalled, reverse the last move.
-
-Strategy: Move gradually. The beam resists bending (high EI). Incremental changes accumulate.
-"""
 
 
 # ---------------------------------------------------------------------------
 # 4. HELPERS
 # ---------------------------------------------------------------------------
-
-def _format_plan_section(plan: str) -> str:
-    """Prepend the plan to the decision prompt if one exists."""
-    if not plan:
-        return ""
-    return f"Strategy:\n{plan}\n\n"
-
-
-def _format_eval_section(eval_result: dict) -> str:
-    """Format the deterministic evaluator result for the decision prompt."""
-    if not eval_result:
-        return ""
-    pct = eval_result.get("error_percent", 100.0)
-    diag = eval_result.get("diagnostics", "")
-    return (
-        f"GEOMETRIC SHAPE ERROR (deterministic ground truth):\n"
-        f"  {pct:.1f}% error  (0% = perfect match, 100% = no match)\n"
-        f"  {diag}\n\n"
-    )
-
-
-def _format_error_section(error: str) -> str:
-    """Surface a safety rejection so the LLM knows why its last BC was refused."""
-    if not error:
-        return ""
-    return (
-        f"*** PREVIOUS BC REJECTED — DO NOT REPEAT THIS MOVE ***\n"
-        f"  {error}\n"
-        f"  Adjust your values to satisfy the safe limit stated above and try again.\n\n"
-    )
-
 
 def _detect_stagnation(bc_history: list, tol: float = 1e-4) -> bool:
     """Return True if the last few BCs are nearly identical (no progress)."""
@@ -236,13 +146,8 @@ def planner_node(state: ControllerState) -> dict:
     if config.ORCHESTRATOR_MODE != "plan" or state["plan"]:
         return {}
 
-    ps = state["physical_system"]
-    prompt = _PLAN_PROMPT.format(
-        wall_description = describe_walls(ps.walls),
-        rod_length       = ps.rod_length,
-        EI               = ps.EI,
-        target_shape     = state["target_shape"] or "unspecified",
-    )
+    prompt = build_plan_prompt(state)
+
     if config.DEBUG:
         print("\n" + "="*70)
         print("[PLANNER SYSTEM]")
@@ -252,36 +157,15 @@ def planner_node(state: ControllerState) -> dict:
         print("="*70)
         print(prompt)
         print("="*70 + "\n")
+
     plan = call_llm(prompt=prompt, system=_PLAN_SYSTEM)
     return {"plan": plan}
 
 
 def decision_node(state: ControllerState) -> dict:
     """Issue the next BC decision and assess convergence."""
-    ps  = state["physical_system"]
-    lvl = config.OBSERVATION_LEVEL
-
-    if state["shape_history"]:
-        current_section = describe_nodes(
-            state["shape_history"][-1], state["bc_current"], level=lvl,
-        ) + "\n"
-    else:
-        current_section = "(initial straight-down configuration)\n"
-
-    prompt = _DECISION_PROMPT.format(
-        target_shape     = state["target_shape"] or "unspecified",
-        wall_description = describe_walls(ps.walls),
-        rod_length       = ps.rod_length,
-        EI               = ps.EI,
-        k                = config.K_HISTORY,
-        plan_section     = _format_plan_section(state["plan"]),
-        error_section    = _format_error_section(state.get("error") or ""),
-        history_section  = describe_history(
-                               state["bc_history"], state["shape_history"], level=lvl,
-                           ) + "\n",
-        current_section  = current_section,
-        eval_section     = _format_eval_section(state.get("eval_result", {})),
-    )
+    # Build prompt from modular sub-prompts (Tier 1 only in Phase 2; Tier 2-4 TBD)
+    prompt = build_decision_prompt(state)
 
     if config.DEBUG:
         print("\n" + "="*70)
@@ -306,16 +190,20 @@ def decision_node(state: ControllerState) -> dict:
     print(f"\n[Iteration {iteration_num}] Orchestrator decision:")
     print(f"  x0 = {decision['x0']:+.6f} m  |  y0 = {decision['y0']:+.6f} m  |  θ = {decision['theta']:+.6f} rad")
 
-    # Convergence assessment
+    # Convergence assessment (TODO: move to prompt_builder in Phase 3)
+    ps = state["physical_system"]
     eval_result = state.get("eval_result", {})
-    convergence_prompt = (
-        f"TARGET SHAPE: {state['target_shape']}\n"
-        f"WALL: {describe_walls(ps.walls)}\n\n"
-        f"CURRENT BEAM STATE (observable nodes):\n"
-        f"{current_section}"
-        + (_format_eval_section(eval_result) if eval_result else "")
-        + f"\nHas the beam been deformed into a {state['target_shape']} shape? "
-        f"Judge by: curvature direction, symmetry, contact with the wall, overall shape match. "
+
+    # Build minimal convergence prompt
+    convergence_prompt = f"TARGET SHAPE: {state['target_shape']}\n"
+    if eval_result:
+        convergence_prompt += (
+            f"ERROR: {eval_result.get('error_percent', 100.0):.1f}%\n"
+            f"ASSESSMENT: {eval_result.get('diagnostics', '')}\n\n"
+        )
+    convergence_prompt += (
+        f"Has the beam been deformed into a {state['target_shape']} shape? "
+        f"Judge by the error percentage and diagnostics above. "
         f"Be strict: the shape must clearly match the target."
     )
     if config.DEBUG:

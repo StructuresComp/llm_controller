@@ -134,18 +134,18 @@ def _print_startup_summary(args, ps, cfg) -> None:
     else:
         print("Walls        : none")
 
-    arm_nodes   = [0, 1]
-    fixed_nodes = [n for n in ps.controlled_nodes if n not in arm_nodes]
-    print(f"Arm nodes    : {arm_nodes}  (position + angle commanded each iteration)")
-    if fixed_nodes:
-        print(f"Fixed nodes  : {fixed_nodes}  (tip clamped — no walls, prevents rigid-body translation)")
+    # Describe control topology semantically (no node indices)
+    print("Control topology:")
+    print("  Clamped end (node 0): YOU control position (x0, y0) and slope (θ) each iteration")
+    if ps.walls:
+        print("  Free end: Can deform freely; walls prevent penetration")
     else:
-        print("Fixed nodes  : none  (tip is free; walls constrain the beam)")
+        print("  Tip region (nodes nv-2, nv-1): Fixed in space — prevents unconstrained translation under gravity")
 
     print(f"Rod length   : {ps.rod_length:.4f} m")
 
     if ps.walls:
-        print(f"Safety check : nodes {arm_nodes} checked against walls; tolerance {tol:.4f} m")
+        print(f"Safety check : clamped end checked against walls; tolerance {tol:.4f} m")
     else:
         print("Safety check : disabled (no walls)")
 
@@ -222,7 +222,15 @@ def main():
     finally:
         config_writer.close()
 
-    # Step 8 — print end-of-run summary.
+    # Step 8a — print orchestrator plan (if in plan mode)
+    if config.ORCHESTRATOR_MODE == "plan" and result.get("plan"):
+        print("\n" + "="*70)
+        print("🧠 ORCHESTRATOR PLAN (from LLM planning phase)")
+        print("="*70)
+        print(result["plan"])
+        print("="*70)
+
+    # Step 8b — print end-of-run summary.
     print("\n" + "="*70)
     print("CONTROL LOOP SUMMARY")
     print("="*70)

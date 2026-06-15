@@ -27,6 +27,12 @@ class TipReachCase(BenchmarkCase):
         f"The beam hangs from the origin; bend it so the last node reaches the target. "
         f"No walls — the tip position is the only goal."
     )
+    loss_description = (
+        f"Error is the Euclidean distance from the beam's tip to the target point "
+        f"({TARGET_X:.2f}, {TARGET_Y:.2f}) m, normalized by the beam length. "
+        f"0% error means the tip is exactly at the target. "
+        f"Larger distances increase error percentage (100% = tip very far from target)."
+    )
 
     def reference_fn(self, x0=0.0, y0=0.0, theta=0.0):
         return None   # tip-reach case — no reference shape

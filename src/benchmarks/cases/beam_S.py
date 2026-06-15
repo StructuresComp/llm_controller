@@ -22,6 +22,11 @@ class SShape(BenchmarkCase):
         "point, equal bending in opposite directions, net total turning angle "
         "near zero."
     )
+    loss_description   = (
+        "Error is the RMS deviation of the beam's curvature profile from a full-sine S-curve. "
+        "0% error means the curvature follows a sine wave: positive in the first half, negative in the second half. "
+        "Asymmetry or deviation from the sine profile increases error."
+    )
     success_threshold  = 0.05
 
     def reference_fn(self, x0: float = 0.0, y0: float = 0.0, theta: float = 0.0) -> list:

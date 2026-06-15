@@ -13,6 +13,7 @@ Required class attributes:
     name               str   registry key; must match the --target CLI argument
     physics_type       str   "beam" or "rod"
     target_description str   plain-English goal sent verbatim to the LLM prompt
+    loss_description   str   explanation of the loss metric for the LLM
 
 Optional class attributes:
     success_threshold  float  error_percent below which the task is solved (default 0.05)
@@ -45,6 +46,7 @@ class BenchmarkCase(ABC):
     name:               str
     physics_type:       str
     target_description: str
+    loss_description:   str
     success_threshold:  float = 0.05
     walls:              list  = None   # None → cli.py falls back to config.WALLS
 
@@ -54,7 +56,7 @@ class BenchmarkCase(ABC):
         # skip validation so they can exist without all attributes set.
         if getattr(cls, '__abstractmethods__', None):
             return
-        for attr in ('name', 'physics_type', 'target_description'):
+        for attr in ('name', 'physics_type', 'target_description', 'loss_description'):
             if not isinstance(getattr(cls, attr, None), str):
                 raise TypeError(
                     f"{cls.__name__} must define class attribute '{attr}' as a string"

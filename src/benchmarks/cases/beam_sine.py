@@ -25,6 +25,11 @@ class SineCase(BenchmarkCase):
         "A smooth half-sine wave: starting straight, gradually curving upward then "
         "downward, returning to straight orientation. Tests shape extraction from nodes."
     )
+    loss_description = (
+        "Error is the RMS deviation of the beam's curvature profile from a half-sine wave. "
+        "0% error means the curvature follows a sine wave from 0 to π. "
+        "Deviation from smooth sine curvature or incorrect orientation increases error."
+    )
     success_threshold = 0.05
 
     def __init__(self):

@@ -916,6 +916,9 @@ def discreteBeam(
     "q_new":   q_new.tolist(),
     "u_new":   u0.tolist(),
     "ctime":   ctime,
+    "reactionForce": reactionForce.tolist() if reactionForce is not None else None,
+    "cx": cx.tolist() if walls else None,
+    "cy": cy.tolist() if walls else None,
   }
 
 #

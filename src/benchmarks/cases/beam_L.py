@@ -21,6 +21,11 @@ class LShape(BenchmarkCase):
         "near-90° bend concentrated near the tip, tip deflected perpendicular "
         "to the initial hanging direction."
     )
+    loss_description   = (
+        "Error is the RMS deviation of the beam's curvature profile from an L-shape profile. "
+        "0% error means most of the beam is straight (zero curvature), then a sharp ~90° turn near the tip. "
+        "Gradual bending or incorrect turn location increases error."
+    )
     success_threshold  = 0.05
 
     def reference_fn(self, x0: float = 0.0, y0: float = 0.0, theta: float = 0.0) -> list:

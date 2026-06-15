@@ -20,6 +20,11 @@ class CShape(BenchmarkCase):
         "A smooth C-arc: constant curvature throughout, all nodes bending in the "
         "same direction, total turning angle ~90°, tip pressed against the wall."
     )
+    loss_description   = (
+        "Error is the RMS (root-mean-square) deviation of the beam's curvature profile "
+        "from a perfect circular arc. 0% error means the beam matches a quarter-circle exactly. "
+        "Curvature that deviates from constant (e.g., flat sections or kinks) increases error."
+    )
     success_threshold  = 0.05
 
     def reference_fn(self, x0: float = 0.0, y0: float = 0.0, theta: float = 0.0) -> list:

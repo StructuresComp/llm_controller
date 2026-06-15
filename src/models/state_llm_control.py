@@ -72,6 +72,20 @@ class ControllerState(TypedDict):
     # Empty dict before first evaluation or when target_shape is unset.
     eval_result: dict
 
+    # ============ CONTACT STATE & FEEDBACK (from discreteBeam)
+    # Reaction force felt by the controller (robot arm) at the clamped end.
+    # Computed as: F_feedback = -sum(reactionForce[0:4]) (first two nodes).
+    # List of floats [Fx, Fy, ...] for all DOFs, or None.
+    reaction_force: list | None
+
+    # Wall contact state: which wall (if any) pins each node's x-DOF.
+    # cx[i] = wall index pinning node i's x-DOF, or -1 if free. None if no walls.
+    contact_x: list | None
+
+    # Wall contact state: which wall (if any) pins each node's y-DOF.
+    # cy[i] = wall index pinning node i's y-DOF, or -1 if free. None if no walls.
+    contact_y: list | None
+
     # ============ GLOBAL
     error: str | None
 
@@ -101,5 +115,8 @@ def initial_controller_state(
         "result":            "",
         "iteration_log":     [],
         "eval_result":       {},
+        "reaction_force":    None,
+        "contact_x":         None,
+        "contact_y":         None,
         "error":             None,
     }

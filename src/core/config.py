@@ -63,7 +63,7 @@ CHECK_SHAPE_REFLECTION = False  # if True, also test reversed traversal and take
 
 ORCHESTRATOR_MODE = "plan"   # "plan" (grounded) or "myopic" (reactive)
 ALLOW_REPLAN      = False    # if True, orchestrator can discard and redo the plan
-MAX_ITERATIONS    = 10       # hard stop on orchestrator → programmer cycles
+MAX_ITERATIONS    = 500       # hard stop on orchestrator → programmer cycles
 
 # ===========================================================================
 # 3. SIMULATION & VISUALIZATION
@@ -92,7 +92,7 @@ WALLS = []  # list of wall dicts; empty = no wall
 # Use large sentinels (±10) for walls that should span the full simulation domain.
 # Empty list = no wall.
 
-TOLERANCE_DISTANCE = 0.1 * ROD_LENGTH  # min clearance (m) the controlled nodes must keep from any wall
+TOLERANCE_DISTANCE = 0.02 * ROD_LENGTH  # min clearance (m) the controlled nodes must keep from any wall
                                         # safety agent flags a violation if a node comes within this distance
                                         # 10% of rod length is a reasonable default; set to 0 to disable
 
@@ -120,5 +120,5 @@ PLOT_IMAGE = 1   # 1 = show beam plots during simulation, 0 = suppress
 #                    If exceeded, the oldest entries are trimmed from the front
 #                    so recent history is always preserved.
 # ---------------------------------------------------------------------------
-SAVE_STRIDE = 50     # save every 50th physics step per decision
+SAVE_STRIDE = 10     # save every 50th physics step per decision
 MAX_CONFIGS = 1000   # hard cap; oldest trimmed if exceeded
