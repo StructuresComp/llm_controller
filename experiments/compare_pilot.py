@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stability_analysis import load_trajectory, build_observables, edmd_spectral_radius  # noqa: E402
 from behavioral_metrics import compute_metrics  # noqa: E402
 
-MODELS = ["haiku", "qwen"]
+MODELS = ["haiku", "qwen", "local"]
 TASKS = ["C", "S", "S_infeasible"]
 LOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
 MIN_FIT = 14  # need ~depth*(m+1)+ for a meaningful EDMD fit
