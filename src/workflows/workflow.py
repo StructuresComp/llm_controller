@@ -9,10 +9,11 @@
 #                  └──────────────────────────────────(loop)──┘
 #
 # The orchestrator is itself a compiled sub-graph (planner → decision).
-# The loop runs until state["converged"] is True, state["error"] is set
-# by the programmer (physics failure), or LangGraph's recursion_limit is hit.
-# Safety violations route back to the orchestrator — they never reach the
-# programmer or evaluator, so they do not count as iterations.
+# The loop runs until the evaluator reports solved, the programmer sets
+# state["error"] (physics failure), or MAX_ITERATIONS is reached. Safety
+# violations route back to the orchestrator without counting as iterations,
+# but the run ends after MAX_SAFETY_REJECTIONS consecutive rejections so the
+# orchestrator↔safety loop cannot spin forever.
 # ---------------------------------------------------------------------------
 
 from langgraph.graph import END, StateGraph
@@ -26,8 +27,18 @@ from src.agents.evaluator_agent import evaluator_node
 
 
 def _after_safety(state: ControllerState) -> str:
-    """Route after safety check: back to orchestrator on violation, else programmer."""
-    return "orchestrator" if state.get("error") else "programmer"
+    """Route after safety check.
+
+    Safe BC → programmer. Violation → retry via the orchestrator, but end the
+    run once MAX_SAFETY_REJECTIONS consecutive rejections have piled up — this
+    bounds the otherwise-unbounded orchestrator↔safety loop (a weak model can
+    repeatedly propose wall-violating BCs and never reach an iteration).
+    """
+    if not state.get("error"):
+        return "programmer"
+    if state.get("safety_rejections", 0) >= config.MAX_SAFETY_REJECTIONS:
+        return "end"
+    return "orchestrator"
 
 
 def _should_continue(state: ControllerState) -> str:
@@ -61,7 +72,7 @@ def build_controller_graph():
     graph.add_conditional_edges(
         "safety",
         _after_safety,
-        {"orchestrator": "orchestrator", "programmer": "programmer"},
+        {"orchestrator": "orchestrator", "programmer": "programmer", "end": END},
     )
     graph.add_edge("programmer", "evaluator")
     graph.add_conditional_edges(

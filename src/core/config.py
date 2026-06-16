@@ -64,6 +64,8 @@ CHECK_SHAPE_REFLECTION = False  # if True, also test reversed traversal and take
 ORCHESTRATOR_MODE = "plan"   # "plan" (grounded) or "myopic" (reactive)
 ALLOW_REPLAN      = False    # if True, orchestrator can discard and redo the plan
 MAX_ITERATIONS    = 10       # hard stop on orchestrator → programmer cycles
+MAX_SAFETY_REJECTIONS = 10   # consecutive safety rejections of a BC before the run ends
+                             # (bounds the orchestrator↔safety loop; see workflows/workflow.py)
 
 # ===========================================================================
 # 3. SIMULATION & VISUALIZATION
