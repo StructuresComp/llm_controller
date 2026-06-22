@@ -543,3 +543,90 @@ The benchmark includes task configs, prompts, simulator code, losses, metrics,
 trajectories, videos, and model responses.
 
 It does not blur the main paper's logic. The science stands on the focused subset.
+
+---
+
+# 14. Difficulty Scaling and Recovery Cases (Added June 2026)
+
+Two new case families were added to improve coverage of the behavioral metrics
+defined in §4–5, specifically the capability threshold (difficulty scaling) and
+the recovery metric (recovery case).
+
+---
+
+## 14.1. Difficulty-Scaled C-Arc (`C_30`, `C_60`, `C_90`, `C_120`, `C_150`)
+
+**Files:** `src/benchmarks/cases/beam_C_scaled.py`, `src/benchmarks/loss_beam/profile_C.py`
+
+**Goal:** Bend the beam to a constant-curvature arc at a specific total turning
+angle (30°, 60°, 90°, 120°, or 150°). Free-space — no walls.
+
+**Loss:** Fixed-target θ-profile RMS. The target arc amplitude is pinned to the
+specified angle via `make_fit_c(target_turn)`. A beam bent to the wrong angle
+scores high error even if its shape is a perfect arc.
+
+```
+fit = make_fit_c(target_turn_rad)
+L   = profile_loss(nodes, profile_c, fit)
+```
+
+This is the same fixed-target pattern used by `S_infeasible` (`make_fit_s`).
+The existing `fit_c` for `beam_C` is now defined as `make_fit_c(π/2)` — no
+behaviour change for existing runs.
+
+**Behavioral use:** Provides a scalar difficulty axis. Each model has a capability
+threshold — the turning angle at which `improvement_stability` drops and
+`bad_step_rate` rises. This threshold is a clean per-model fingerprint for
+cross-LLM comparison.
+
+**Run:**
+```bash
+python3 cli.py --target C_30    # easy
+python3 cli.py --target C_90    # medium (equivalent angle to original C)
+python3 cli.py --target C_150   # hard
+```
+
+---
+
+## 14.2. Recovery Case (`C_recover`)
+
+**File:** `src/benchmarks/cases/beam_C_recover.py`
+
+**Goal:** Identical target to `beam_C` (quarter-circle arc, wall at y = -0.12 m),
+but the beam starts in a deliberately bad configuration — bent hard to the left
+(opposite the correct direction) — before the LLM takes control.
+
+**Initial bad state:** `initial_bc = [-0.03, -0.01, -0.8 rad]`
+Puts the tip at approximately `(-0.08, -0.10)` — verified physically reachable.
+
+**Loss:** Same as `beam_C` — fixed-target θ-profile RMS via `fit_c`.
+
+**Infrastructure:** The `initial_bc` class attribute on `BenchmarkCase` (default
+`None`) tells `cli.py` to pre-run `discreteBeam` to the bad state before building
+the initial `ControllerState`. The LLM inherits the bad beam state; `shape_history`
+and `bc_history` start from it.
+
+**Behavioral use:** Measures the `recovery` metric under controlled conditions.
+Compare against `beam_C` runs (straight-down start, same target) to isolate the
+cost of undoing the bad state from normal convergence. Key signals:
+- **iterations-to-first-improvement** — how long before net progress begins
+- **oscillation** — does the model overshoot when reversing course?
+- **false_convergence_rate** — does it give up early while still in the bad state?
+
+**Run:**
+```bash
+python3 cli.py --target C_recover
+```
+
+---
+
+## 14.3. Updated Main-Paper Subset
+
+| # | Task | Class | Physics | Status |
+|---|------|-------|---------|--------|
+| 1 | C-shape (wall-assisted) | 2.1 | beam | ✓ |
+| 2 | S-shape (free-space) | 1.4 | beam | ✓ |
+| 3 | S-shape (infeasible) | 1.4 infeasible | beam | ✓ |
+| 4 | C_30 → C_150 (difficulty ramp) | 1.1 scaled | beam | ✓ |
+| 5 | C_recover (recovery) | 1.1 recovery | beam | ✓ |
+| 6 | L-tube navigation | 3.1 | beam | planned |

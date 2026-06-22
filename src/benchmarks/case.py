@@ -47,6 +47,7 @@ class BenchmarkCase(ABC):
     target_description: str
     success_threshold:  float = 0.05
     walls:              list  = None   # None → cli.py falls back to config.WALLS
+    initial_bc:         list  = None   # None → straight-down default; [x0, y0, theta] → pre-run physics to this BC before the LLM loop starts
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)

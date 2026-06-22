@@ -211,9 +211,40 @@ def main():
     ps = make_physical_system(config)
     _print_startup_summary(args, ps, config)
 
+    # Step 5b — if the benchmark specifies an initial_bc, pre-run the physics
+    # to that configuration before handing control to the LLM.  This lets
+    # recovery cases start from a deliberately bad beam state.
+    _pre_q0 = _pre_u0 = _pre_ctime = _pre_bc = None
+    if args.target and getattr(bm, "initial_bc", None) is not None:
+        from src.tools.Discrete_Elastic_Beams import discreteBeam
+        x0_bad, y0_bad, theta_bad = bm.initial_bc
+        print(f"[Recovery] Pre-running physics to initial_bc: "
+              f"x0={x0_bad:+.4f}  y0={y0_bad:+.4f}  θ={theta_bad:+.4f}")
+        r_pre = discreteBeam(
+            physical_system  = ps,
+            control_position = (x0_bad, y0_bad),
+            control_angle    = theta_bad,
+            plotImage        = 0,
+        )
+        if r_pre["status"] != "success":
+            print(f"[Recovery] Pre-run failed: {r_pre['message']}. "
+                  "Falling back to straight-down initial state.")
+        else:
+            _pre_q0    = r_pre["q_new"]
+            _pre_u0    = r_pre["u_new"]
+            _pre_ctime = r_pre["ctime"]
+            _pre_bc    = list(bm.initial_bc)
+
     # Step 6 — initialize trajectory disk writer and build initial state.
     config_writer = ConfigWriter(run_name=config.RUN_NAME)
     state  = initial_controller_state(physical_system=ps, target_shape=args.target, config_writer=config_writer)
+
+    # Apply pre-run state if recovery case pre-run succeeded.
+    if _pre_q0 is not None:
+        state["q0_current"]    = _pre_q0
+        state["u0_current"]    = _pre_u0
+        state["ctime_current"] = _pre_ctime
+        state["bc_current"]    = _pre_bc
 
     # Step 7 — run the control loop.
     graph  = build_controller_graph()
