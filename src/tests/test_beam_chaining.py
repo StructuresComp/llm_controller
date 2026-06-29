@@ -11,7 +11,7 @@
 
 import numpy as np
 from src.core import config
-from src.models.physical_system import make_physical_system
+from src.models.physical_system import make_physical_system, initial_q0, initial_u0
 from src.tools.Discrete_Elastic_Beams import discreteBeam
 
 
@@ -25,6 +25,8 @@ def run():
     print(f"Controller decision:  position = {cp1},  angle = {ca1:.3f} rad")
     r1 = discreteBeam(
         physical_system  = ps,
+        q0               = initial_q0(ps),
+        u0               = initial_u0(ps),
         control_position = cp1,
         control_angle    = ca1,
         dt               = config.DT,
@@ -62,6 +64,8 @@ def run():
     # a fresh-start run (i.e., chaining actually changed the result)
     r2_fresh = discreteBeam(
         physical_system  = ps,
+        q0               = initial_q0(ps),
+        u0               = initial_u0(ps),
         control_position = (0.0, -0.05),
         control_angle    = 0.4,
         dt               = config.DT,

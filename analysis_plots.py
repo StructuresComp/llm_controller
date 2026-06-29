@@ -50,10 +50,15 @@ def load_trajectory(run_name: str) -> dict:
         raise FileNotFoundError(f"Trajectory file not found: {jsonl_path}")
 
     snapshots = []
+    header_data = {}
     with open(jsonl_path, "r") as f:
         for line in f:
             if line.strip():
-                snapshots.append(json.loads(line))
+                record = json.loads(line)
+                if record.get("type") == "header":
+                    header_data = record
+                    continue
+                snapshots.append(record)
 
     if not snapshots:
         raise ValueError(f"Trajectory file is empty: {jsonl_path}")
@@ -85,9 +90,10 @@ def load_trajectory(run_name: str) -> dict:
     return {
         "iterations": iterations,
         "metadata": {
-            "snapshot_count": len(snapshots),
+            "snapshot_count":  len(snapshots),
             "iteration_count": len(iterations),
-            "jsonl_path": str(jsonl_path),
+            "jsonl_path":      str(jsonl_path),
+            "header":          header_data,
         },
     }
 
@@ -414,7 +420,7 @@ def main():
     # If no --run specified, find the latest
     if not args.run:
         import sys
-        jsonl_files = sorted(LOGS_DIR.glob("run_*.jsonl"))
+        jsonl_files = sorted(LOGS_DIR.glob("*.jsonl"))
         if not jsonl_files:
             print("Error: no trajectory files found in logs/", file=sys.stderr)
             sys.exit(1)

@@ -32,6 +32,44 @@ def crossMat(a):
 
     return A
 
+# CURVATURE UTILITY
+def compute_axial_strain(q: np.ndarray, nv: int, deltaL: float) -> np.ndarray:
+    """
+    Axial strain at each edge from DOF vector q.
+
+    Returns array of length nv-1: (actual_edge_length - deltaL) / deltaL for each edge.
+    Positive = stretched, negative = compressed.
+    """
+    strain = np.zeros(nv - 1)
+    for i in range(nv - 1):
+        dx = q[2*(i+1)]   - q[2*i]
+        dy = q[2*(i+1)+1] - q[2*i+1]
+        strain[i] = (np.sqrt(dx*dx + dy*dy) - deltaL) / deltaL
+    return strain
+
+
+def compute_kappa_dimensional(q: np.ndarray, nv: int, deltaL: float) -> np.ndarray:
+    """
+    Dimensional curvature (1/m) at each node from DOF vector q.
+
+    Returns array of length nv: 0.0 at endpoints, kappa1/deltaL at interior nodes.
+    Computed directly in 2D — equivalent to the 3D formula in gradEb/hessEb since the
+    beam is planar, but avoids the 3D augmentation needed there for gradient/Hessian math.
+    """
+    kappa = np.zeros(nv)
+    for k in range(1, nv - 1):
+        node0 = np.array([q[2*(k-1)], q[2*(k-1)+1]])
+        node1 = np.array([q[2*k],     q[2*k+1]])
+        node2 = np.array([q[2*(k+1)], q[2*(k+1)+1]])
+        ee = node1 - node0
+        ef = node2 - node1
+        te = ee / np.linalg.norm(ee)
+        tf = ef / np.linalg.norm(ef)
+        kappa1    = 2.0 * (te[0]*tf[1] - te[1]*tf[0]) / (1.0 + np.dot(te, tf))
+        kappa[k]  = kappa1 / deltaL
+    return kappa
+
+
 # Gradient and Hessian of elastic energies
 def gradEb(xkm1, ykm1, xk, yk, xkp1, ykp1, curvature0, l_k, EI):
     """
@@ -86,12 +124,12 @@ def gradEb(xkm1, ykm1, xk, yk, xkp1, ykp1, curvature0, l_k, EI):
     # Curvature binormal
     kb = 2.0 * np.cross(te, tf) / (1.0 + np.dot(te, tf))
 
+    # Curvature
+    kappa1 = kb[2]
+
     chi = 1.0 + np.dot(te, tf)
     tilde_t = (te + tf) / chi
     tilde_d2 = (m2e + m2f) / chi
-
-    # Curvature
-    kappa1 = kb[2]
 
     # Gradient of kappa1 with respect to edge vectors
     Dkappa1De = 1.0 / norm_e * (-kappa1 * tilde_t + np.cross(tf, tilde_d2))
@@ -528,13 +566,13 @@ def getControlNodes(
   over totalTime, then places node 1 from node 0 using the inextensible
   beam assumption.
 
-  Angle convention: theta is measured counter-clockwise from the -Y axis.
-    theta =  0      -> beam points straight down  (tangent = [ 0, -1])
-    theta =  pi/2   -> beam points right           (tangent = [ 1,  0])
-    theta = -pi/2   -> beam points left            (tangent = [-1,  0])
-    theta =  pi     -> beam points straight up     (tangent = [ 0,  1])
-  Tangent vector: (sin(theta), -cos(theta))
-  Node 1 = Node 0 + deltaL * (sin(theta), -cos(theta))
+  Angle convention: theta is measured counter-clockwise from the +X axis (standard math convention).
+    theta =  0      -> beam points right           (tangent = [ 1,  0])
+    theta =  pi/2   -> beam points straight up     (tangent = [ 0,  1])
+    theta = -pi/2   -> beam points straight down   (tangent = [ 0, -1])
+    theta =  pi     -> beam points left            (tangent = [-1,  0])
+  Tangent vector: (cos(theta), sin(theta))
+  Node 1 = Node 0 + deltaL * (cos(theta), sin(theta))
 
   Parameters
   ----------
@@ -543,7 +581,7 @@ def getControlNodes(
   control_position : tuple[float, float]
       Target position of node 0: (x0_target, y0_target).
   control_angle : float
-      Target angle at node 0 (radians, from -Y axis, clockwise positive).
+      Target angle at node 0 (radians, counter-clockwise from +X axis, standard math convention).
   initial_controlled_nodes : np.ndarray
       [x0, y0, x1, y1] of nodes 0 and 1 at t = 0.
   totalTime : float
@@ -560,7 +598,7 @@ def getControlNodes(
   x1_init, y1_init = initial_controlled_nodes[2], initial_controlled_nodes[3]
 
   # Recover initial angle from the initial node positions
-  theta_init = np.arctan2(x1_init - x0_init, -(y1_init - y0_init))
+  theta_init = np.arctan2(y1_init - y0_init, x1_init - x0_init)
 
   x0_target, y0_target = control_position
 
@@ -572,8 +610,8 @@ def getControlNodes(
   theta = theta_init + alpha * (control_angle - theta_init)
 
   # Node 1 from node 0 + tangent (inextensible beam)
-  x1 = x0 + deltaL * np.sin(theta)
-  y1 = y0 - deltaL * np.cos(theta)
+  x1 = x0 + deltaL * np.cos(theta)
+  y1 = y0 + deltaL * np.sin(theta)
 
   return np.array([x0, y0, x1, y1])
 
@@ -643,7 +681,6 @@ def objfun(q_old, u_old, dt, tol, maximum_iter,
 
   return _package_result(q_new, f, flag, None, q0, u0, ctime)
 
-
 # ---------------------------------------------------------------------------
 # RESULT BUILDER
 # ---------------------------------------------------------------------------
@@ -660,8 +697,8 @@ def _package_result(q_new: np.ndarray, reactionForce: np.ndarray, flag: int,
     return {
       "status": "failed_convergence",
       "message": error_msg,
-      "q_new": q0.tolist(),
-      "u_new": u0.tolist(),
+      "q_new": q0,
+      "u_new": u0,
       "ctime": ctime,
     }
   return {
@@ -677,15 +714,14 @@ def _package_result(q_new: np.ndarray, reactionForce: np.ndarray, flag: int,
 
 def discreteBeam(
   physical_system: dict,
-  q0: list = None,
-  u0: list = None,
+  q0: list,
+  u0: list,
   control_position: tuple = (0.0, 0.0),
   control_angle: float = 0.0,
   t_start: float = 0.0,
   dt: float = 0.01,
   totalTime: float = None,
   plotImage: int = 0,
-  plotStep: int = 5,
   save_stride: int = 1) -> dict:
 
   """
@@ -712,8 +748,8 @@ def discreteBeam(
       Target position of node 0: (x0_target, y0_target).
 
   control_angle : float
-      Target angle at node 0 (radians, counter-clockwise from -Y axis).
-      theta = 0 -> straight down;  theta = pi/2 -> pointing right.
+      Target angle at node 0 (radians, counter-clockwise from +X axis, standard math convention).
+      theta = 0 -> pointing right;  theta = -pi/2 -> straight down.
 
   t_start : float
       Cumulative simulation time at the start of this call (seconds).
@@ -730,10 +766,7 @@ def discreteBeam(
       prescribed quasi-static rate. Override for testing.
 
   plotImage : int
-      If 1, show beam configuration at every plotStep time steps.
-
-  plotStep : int
-      Plot every this many time steps (only used when plotImage = 1).
+      0 = no plot. N >= 1 = plot every Nth time step (and always the final step).
 
   save_stride : int
       Save every Kth physics step to q_history (default 1 = every step).
@@ -770,16 +803,6 @@ def discreteBeam(
   tol          = physical_system.tol         # Newton tolerance (pre-computed)
   maximum_iter = physical_system.maximum_iter  # Newton max iterations (pre-computed)
 
-  # Initialise q0/u0 on first call (straight vertical, zero velocity)
-  if q0 is None:
-    q0 = np.array(initial_q0(physical_system), dtype=float)
-  else:
-    q0 = np.array(q0, dtype=float)
-
-  if u0 is None:
-    u0 = np.array(initial_u0(physical_system), dtype=float)
-  else:
-    u0 = np.array(u0, dtype=float)
 
   # Compute totalTime from boundary velocities if not explicitly provided
   if totalTime is None:
@@ -788,7 +811,7 @@ def discreteBeam(
 
     x0_curr, y0_curr = q0[0], q0[1]
     x1_curr, y1_curr = q0[2], q0[3]
-    theta_curr = np.arctan2(x1_curr - x0_curr, -(y1_curr - y0_curr))
+    theta_curr = np.arctan2(y1_curr - y0_curr, x1_curr - x0_curr)
 
     x0_tgt, y0_tgt = control_position
     delta_pos   = np.sqrt((x0_tgt - x0_curr)**2 + (y0_tgt - y0_curr)**2)
@@ -903,7 +926,7 @@ def discreteBeam(
                              q0, u0, ctime)
 
     # Plot — fire on stride OR on the final step so at least one frame always renders.
-    if plotImage and (timeStep % plotStep == 0 or timeStep == Nsteps):
+    if plotImage > 0 and (timeStep % plotImage == 0 or timeStep == Nsteps):
       first_frame = not plt.fignum_exists(1)
       _plot_beam_state(q_new, ctime, walls, rod_length)
       if first_frame:
@@ -913,9 +936,11 @@ def discreteBeam(
     "status":    "success",
     "message":   f"Simulation completed {Nsteps - 1} steps to t = {ctime:.4f} s.",
     "q_history": q_history,
-    "q_new":   q_new.tolist(),
-    "u_new":   u0.tolist(),
-    "ctime":   ctime,
+    "q_new":              q_new,
+    "u_new":              u0,
+    "ctime":              ctime,
+    "kappa_dimensional":  compute_kappa_dimensional(q_new, nv, deltaL),
+    "axial_strain":       compute_axial_strain(q_new, nv, deltaL),
     "reactionForce": reactionForce.tolist() if reactionForce is not None else None,
     "cx": cx.tolist() if walls else None,
     "cy": cy.tolist() if walls else None,
@@ -955,7 +980,7 @@ if __name__ == "__main__":
     # Traverse left → right: edge=(+1,0) → n=(0,+1) pointing up (floor)
     walls          = [{"P0": [-10, -0.12], "P1": [10, -0.12]}]
     ctrl_position  = (0.0, -0.07)
-    ctrl_angle     = 0.0
+    ctrl_angle     = -np.pi / 2
     label          = "Case 2: infinite horizontal floor at y = -0.12 m"
 
   elif CASE == 3:
@@ -981,7 +1006,7 @@ if __name__ == "__main__":
       {"P0": [ 0.01, -0.10], "P1": [ 0.01,  0.02]},  # right of vert.  n=[-1,  0]
     ]
     ctrl_position  = (0.0, -0.06)
-    ctrl_angle     = 0.0
+    ctrl_angle     = -np.pi / 2
     label          = "Case 4: L-shaped tube"
 
   else:
@@ -994,10 +1019,11 @@ if __name__ == "__main__":
   ps     = make_physical_system(cfg)
   result = discreteBeam(
     physical_system  = ps,
+    q0               = initial_q0(ps),
+    u0               = initial_u0(ps),
     control_position = ctrl_position,
     control_angle    = ctrl_angle,
     plotImage        = 1,
-    plotStep         = 1,
     dt               = config.DT,
   )
 

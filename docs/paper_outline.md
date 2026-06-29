@@ -284,6 +284,11 @@ Example tasks include:
 This family tests whether the LLM can detect physical limits, avoid meaningless escalation, and recover from failed attempts.
 
 ---
+## Agent Architectures
+
+We consider three agent architectures for deformable object control. **Reactive Control** is purely myopic: at each iteration, the LLM receives the current shape, target shape, and interaction history, and directly selects the next boundary condition. **Plan-Then-Control** first asks the LLM to generate a high-level strategy for reaching the target shape; this plan is then included in the prompt at every subsequent control step but remains fixed throughout the episode. **Adaptive Plan-and-Control** combines planning and control, where at each iteration the LLM selects the next boundary condition and simultaneously decides whether to retain, modify, or completely revise its current plan based on the observed outcome. Together, these architectures span increasing levels of temporal abstraction, from reactive decision-making to persistent strategic reasoning and adaptive replanning.
+
+---
 
 ## Language Task Families
 

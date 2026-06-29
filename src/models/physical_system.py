@@ -178,7 +178,7 @@ def make_physical_system(cfg=None) -> BeamPhysicalSystem:
         m[2*k]     = dm
         m[2*k + 1] = dm
 
-    g = np.array([0.001, -9.8])
+    g = np.array(getattr(cfg, "GRAVITY", [0.001, -9.8]))
     W = np.zeros(2 * nv)
     for k in range(nv):
         W[2*k]     = m[2*k]     * g[0]
@@ -228,15 +228,14 @@ def make_physical_system(cfg=None) -> BeamPhysicalSystem:
 # INITIAL CONDITIONS
 # ---------------------------------------------------------------------------
 
-def initial_q0(ps: BeamPhysicalSystem) -> list:
+def initial_q0(ps: BeamPhysicalSystem) -> np.ndarray:
     """Straight vertical initial configuration: nodes at (0,0), (0,-deltaL), ..."""
     q = np.zeros(ps.ndof)
     for i in range(ps.nv):
-        q[2*i]     = 0.0
         q[2*i + 1] = -i * ps.deltaL
-    return q.tolist()
+    return q
 
 
-def initial_u0(ps: BeamPhysicalSystem) -> list:
+def initial_u0(ps: BeamPhysicalSystem) -> np.ndarray:
     """Zero velocity initial condition."""
-    return [0.0] * ps.ndof
+    return np.zeros(ps.ndof)

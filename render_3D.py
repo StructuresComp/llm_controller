@@ -21,8 +21,25 @@ from src.visualization.mechview_export import convert
 
 
 def latest_run(logs_dir: Path) -> Path | None:
-    runs = sorted(logs_dir.glob("run_*.json"))
+    runs = sorted(logs_dir.glob("*.jsonl"))
     return runs[-1] if runs else None
+
+
+def load_run(path: Path) -> dict:
+    """Support both legacy .json and new .jsonl formats."""
+    if path.suffix == ".jsonl":
+        from src.core import config
+        from src.tools.walls import make_wall_2d
+        walls = [make_wall_2d(w) for w in getattr(config, "WALLS", [])]
+        return {
+            "physics_type":    getattr(config, "PHYSICS_TYPE", "beam"),
+            "nv":              config.NV,
+            "rod_length":      config.ROD_LENGTH,
+            "r0":              config.R0,
+            "walls":           walls,
+            "trajectory_file": path.stem,
+        }
+    return json.loads(path.read_text())
 
 
 def main():
@@ -34,14 +51,14 @@ def main():
     else:
         raw_path = latest_run(LOGS_DIR)
         if raw_path is None:
-            print("No run JSON files found in logs/.")
-            print("Run the controller first:  python3 cli.py --target C")
+            print("No run JSONL files found in logs/.")
+            print("Run the controller first:  python3 cli.py --target <shape>")
             sys.exit(0)
         print(f"Using latest run: {raw_path.name}")
 
     VISUALIZATION_DIR.mkdir(exist_ok=True)
 
-    raw = json.loads(raw_path.read_text())
+    raw = load_run(raw_path)
     convert(raw, VISUALIZATION_DIR / "data.js")
 
     src = importlib.resources.files("mechview") / "index.html"

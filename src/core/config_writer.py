@@ -74,6 +74,27 @@ class ConfigWriter:
         self.file.flush()  # force to disk immediately
         self.snapshot_count += 1
 
+    def write_header(self, ps, target_shape: str = ""):
+        """Write a one-time metadata header as the first JSONL line."""
+        walls_user = [
+            {"P0": w["P0"].tolist(), "P1": w["P1"].tolist()}
+            for w in getattr(ps, "walls", [])
+        ]
+        header = {
+            "type": "header",
+            "target_shape": target_shape,
+            "physical_system": {
+                "nv":         ps.nv,
+                "rod_length": ps.rod_length,
+                "EI":         float(ps.EI),
+                "EA":         float(ps.EA),
+                "friction":   ps.friction,
+                "walls":      walls_user,
+            },
+        }
+        self.file.write(json.dumps(header) + "\n")
+        self.file.flush()
+
     def close(self):
         """Flush and close the file handle."""
         if self.file and not self.file.closed:

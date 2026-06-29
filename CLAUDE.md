@@ -4,6 +4,19 @@
 
 ## Non-Negotiable Engineering Rules
 
+### 0. Use ASCII characters only in all prompt strings and observation functions.
+
+Never use Greek letters (θ, κ, ρ, etc.) or other Unicode symbols in any string that
+goes into a prompt or is returned by an observation function. Use ASCII equivalents:
+- θ → theta
+- κ → kappa (or curvature)
+- ρ → rho
+- Δ → delta
+
+This applies to `observation.py`, `prompt_builder.py`, `beam_losses.py`, and any
+function whose output ends up in an LLM prompt. Variable names in Python code are
+unaffected — only user-facing strings.
+
 ### 1. Never trust an LLM to produce structured output without a tool schema.
 
 **Always use `call_llm_with_tool(prompt, tool_schema, tool_name)` when the output

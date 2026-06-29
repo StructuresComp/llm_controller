@@ -4,178 +4,93 @@
 # Converts physical beam state into natural language for LLM prompts.
 #
 # Public API:
-#   describe_walls(walls)                        -> str
-#   describe_nodes(nodes, bc, level)             -> str
+#   describe_wall_constraints(ps)                      -> str
+#   describe_current_shape(q, ps, kappa=None)          -> str
 #   describe_history(bc_history, shape_history, level) -> str
 #
 # Run standalone to inspect prompt text for hand-typed configurations:
 #   python -m src.core.observation
 # ---------------------------------------------------------------------------
 
-import math
-
 import numpy as np
 
-from src.core import config as _config
-
-
-# ---------------------------------------------------------------------------
-# Wall description
-# ---------------------------------------------------------------------------
-
-def describe_walls(walls: list) -> str:
-    """
-    Convert a list of wall dicts (processed format: n, d, P0, P1) into
-    a flat list of geometric descriptions, one per segment.
-    """
-    if not walls:
-        return "none"
-    return "; ".join(_describe_segment(w) for w in walls)
-
-
-def _describe_segment(w: dict) -> str:
-    """Single axis-aligned wall segment → geometric string with allowed-side label."""
-    n, d = w["n"], w["d"]
-    P0, P1 = w["P0"], w["P1"]
-    if n[1] > 0.5:       # normal points up   → floor
-        return f"floor at y={d / n[1]:.4f} m, beam must stay above (x: {P0[0]:.3f} to {P1[0]:.3f})"
-    elif n[1] < -0.5:    # normal points down → ceiling
-        return f"ceiling at y={d / n[1]:.4f} m, beam must stay below (x: {P0[0]:.3f} to {P1[0]:.3f})"
-    elif n[0] > 0.5:     # normal points right → left wall
-        return f"left wall at x={d / n[0]:.4f} m, beam must stay to the right (y: {P0[1]:.3f} to {P1[1]:.3f})"
-    else:                # normal points left  → right wall
-        return f"right wall at x={d / n[0]:.4f} m, beam must stay to the left (y: {P0[1]:.3f} to {P1[1]:.3f})"
-
+from src.core import config
 
 # ---------------------------------------------------------------------------
 # Node / configuration description
 # ---------------------------------------------------------------------------
 
-def describe_nodes(
-    nodes: list,
-    bc: list,
-    level: str = "positions",
-    nv: int = None,
-) -> str:
+def describe_current_shape(q: list, ps, kappa: np.ndarray = None, bc: list = None, decision_num: int = 0) -> str:
     """
-    Convert observable node positions + current BC into prose.
+    Current beam state as natural language for the LLM prompt.
 
-    Args:
-        nodes  — list of (x, y) tuples (N_PARTIAL observable nodes)
-        bc     — [x0, y0, theta] current boundary condition
-        level  — "positions" | "geometric" | "full"
-        nv     — total number of nodes (for arc-length percentage calculation)
+    bc           — [x0, y0, theta] active boundary condition; shown first for consistency with describe_history.
+    decision_num — shown in the header as "Current step (decision N):".
+    Each observable node reported at arc-length s in [0, 1].
+    Curvature appended for interior nodes when kappa is provided (geometric observation level).
     """
-    x0, y0, theta = bc
-    lines = [f"Clamped end (node 0): position ({x0:.4f}, {y0:.4f}) m, angle θ = {theta:.4f} rad"]
-    lines.append("")
-    lines.append("Observable points along the beam:")
-
-    for j, (x, y) in enumerate(nodes):
-        if nv is not None:
-            # Compute arc-length percentage (node index as fraction of total length)
-            # This requires knowing the actual observable node indices, which we don't have here.
-            # So we'll just number them 1, 2, 3...
-            pct = (j / (len(nodes) - 1) * 100) if len(nodes) > 1 else 0
-            lines.append(f"  Point {j+1} ({pct:.0f}% along): x={x:+.6f} m, y={y:+.6f} m")
-        else:
-            lines.append(f"  Point {j+1}: x={x:+.6f} m, y={y:+.6f} m")
-
-    if level in ("geometric", "full"):
-        desc = _compute_descriptors(nodes)
-        if desc:
-            lines.append("")
-            lines.append(_format_descriptors(desc))
+    obs = ps.observable_nodes
+    nv  = ps.nv
+    lines = [f"Current step (decision number: {decision_num}):"]
+    if bc is not None:
+        lines.append(f"  BC (control decision): (x0={bc[0]:+.4f}, y0={bc[1]:+.4f}, theta={bc[2]:+.4f} rad)")
+    lines.append("  Shape of the DLO:")
+    for node_idx in obs:
+        s   = node_idx / (nv - 1)
+        x   = float(q[2 * node_idx])
+        y   = float(q[2 * node_idx + 1])
+        line = f"  - s={s:.2f}: position = ({x:+.6f}, {y:+.6f}) m"
+        if kappa is not None and 0 < node_idx < nv - 1:
+            line += f",  curvature = {kappa[node_idx]:+.2f} /meter"
+        lines.append(line)
     return "\n".join(lines)
 
 
 def describe_history(
     bc_history: list,
     shape_history: list,
-    level: str = "positions",
+    ps,
+    error_history: list,
+    kappa_history: list = None,
 ) -> str:
     """
-    Format rolling (BC, observable nodes) history as prose.
+    Previous control steps paired with their resulting beam configurations.
+    The current step is excluded by the caller (shape_history[-(k+1):-1]) to avoid
+    duplicating describe_current_shape, which shows the current state with richer info.
 
-    Args:
-        bc_history    — list of [x0, y0, theta]
-        shape_history — list of lists of (x, y)
-        level         — observation level (same as describe_nodes)
+    All non-None lists must have the same length as shape_history.
     """
-    if not bc_history:
-        return "(no history yet)"
-    lines = []
-    for i, (bc, shape) in enumerate(zip(bc_history, shape_history)):
-        x0, y0, theta = bc
-        lines.append(f"Step {i+1}: moved node 0 → ({x0:.4f}, {y0:.4f}) θ={theta:.4f} rad")
+    if not shape_history:
+        return ""
+
+    n = len(shape_history)
+    assert len(bc_history) == n, f"bc_history length {len(bc_history)} != shape_history length {n}"
+    if kappa_history is not None:
+        assert len(kappa_history) == n, f"kappa_history length {len(kappa_history)} != {n}"
+    assert len(error_history) == n, f"error_history length {len(error_history)} != {n}"
+
+    obs = ps.observable_nodes
+    nv  = ps.nv
+    lines = [
+        f"Here are the previous {n} decisions (control steps) you made and the resulting DLO shapes:",
+        "Use this to judge whether your moves are progressing toward the target or stagnating.",
+    ]
+    for i, shape in enumerate(shape_history):
+        bc     = bc_history[i]
+        kappas = kappa_history[i] if kappa_history is not None else None
+        lines.append(f"{n - i} step(s) ago:")
+        lines.append(f"  BC (control decision): ({bc[0]:+.4f}, {bc[1]:+.4f}, theta={bc[2]:+.4f} rad)")
+        lines.append(f"  Your reasoning behind the decision: {bc[3]}")
+        lines.append(f"  Shape of the DLO:")
         for j, (x, y) in enumerate(shape):
-            pct = (j / (len(shape) - 1) * 100) if len(shape) > 1 else 0
-            lines.append(f"         Point {j+1} ({pct:.0f}% along): x={x:+.6f} m, y={y:+.6f} m")
-        if level in ("geometric", "full"):
-            desc = _compute_descriptors(shape)
-            if desc:
-                lines.append(_format_descriptors(desc, indent="         "))
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Geometric descriptor helpers
-# ---------------------------------------------------------------------------
-
-def _compute_descriptors(nodes: list) -> dict:
-    """
-    Compute edge tangent angles and relative turning angles (dtheta).
-    Matches the calculation in profile_fitting.py for consistency with loss function.
-    """
-    if len(nodes) < 2:
-        return {}
-    obs = np.array(nodes)
-
-    # Compute tangent angle at each edge (direction from node i to node i+1)
-    edge_vecs = np.diff(obs, axis=0)
-    theta_edges = np.arctan2(edge_vecs[:, 0], -edge_vecs[:, 1])  # CCW from -Y axis
-
-    # Compute relative turning angle (dtheta) at each transition
-    # This is what the loss function actually measures
-    if len(theta_edges) > 1:
-        theta_start = float(theta_edges[0])
-        dtheta = (theta_edges - theta_start + math.pi) % (2 * math.pi) - math.pi
-    else:
-        dtheta = np.array([0.0])
-
-    # Total rotation from first edge to last edge
-    total_turn = float(theta_edges[-1]) - float(theta_edges[0])
-    total_turn = (total_turn + math.pi) % (2 * math.pi) - math.pi
-
-    return {
-        "theta_edges":  [float(t) for t in theta_edges],
-        "dtheta":       [float(d) for d in dtheta],
-        "total_turning": total_turn,
-    }
-
-
-def _format_descriptors(desc: dict, indent: str = "") -> str:
-    """Format geometric descriptors (edge tangents and relative turning angles)."""
-    theta_edges = desc["theta_edges"]
-    dtheta = desc["dtheta"]
-    total = desc["total_turning"]
-
-    lines = [f"{indent}Edge directions (tangent angle of each segment):"]
-    for i, angle in enumerate(theta_edges):
-        deg = math.degrees(angle)
-        lines.append(f"{indent}  Segment {i+1}→{i+2}: {angle:.4f} rad = {deg:+.1f}°")
-
-    lines.append(f"{indent}")
-    lines.append(f"{indent}Relative turning (change in direction between segments):")
-    for i, angle in enumerate(dtheta):
-        deg = math.degrees(angle)
-        turn_desc = "sharp left" if angle < -0.5 else ("sharp right" if angle > 0.5 else "slight")
-        lines.append(f"{indent}  At segment {i+1}: {angle:.4f} rad = {deg:+.1f}° ({turn_desc})")
-
-    lines.append(f"{indent}")
-    total_deg = math.degrees(total)
-    lines.append(f"{indent}Total rotation from first segment to last: {total:.4f} rad = {total_deg:+.1f}°")
-
+            node_idx = obs[j]
+            s = node_idx / (nv - 1)
+            line = f"  - s={s:.2f}: position = ({x:+.6f}, {y:+.6f}) m"
+            if kappas is not None and 0 < node_idx < nv - 1:
+                line += f",  curvature = {kappas[j]:+.2f} /meter"
+            lines.append(line)
+        lines.append(f"  Error: {error_history[i]:.1f}%")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -188,192 +103,140 @@ def describe_beam_physics(ps) -> str:
     Beam properties with Euler-Bernoulli intuition (deflection under 1 N, gravity sag).
     Uses cantilever beam theory to give the LLM physical intuition about stiffness.
     """
-    # Cantilever formula: δ = P * L³ / (3 * EI)
-    # For P = 1 N: δ = L³ / (3 * EI)
+    # Cantilever formula: delta = P * L^3 / (3 * EI)
+    # For P = 1 N: delta = L^3 / (3 * EI)
     deflection_1N = ps.rod_length**3 / (3 * ps.EI)
 
-    # Cantilever under own weight: δ = (m * g * L⁴) / (8 * EI)
-    # where m = mass per unit length = ρ * A = ρ * π * r0²
+    # Cantilever under own weight: delta = (m * g * L^4) / (8 * EI)
+    # where m = mass per unit length = ρ * A = ρ * π * r0^2
     mass_per_length = np.pi * ps.r0**2 * ps.rho
-    g = 9.8
+    g = abs(config.GRAVITY[1])
     sag_under_gravity = (mass_per_length * g * ps.rod_length**4) / (8 * ps.EI)
-
-    stiffness_category = "Stiff (high EI)" if deflection_1N < 0.01 else "Soft (low EI)"
 
     return f"""\
 Beam properties:
   Length: {ps.rod_length:.4f} m
-  Bending stiffness (EI): {ps.EI:.2e} N·m²
-  Material: inextensible (does not stretch under tension)
+  Bending stiffness (EI): {ps.EI:.2e} Nm^2
+  Axial stiffness (EA): {ps.EA:.2e} N — resists stretching, but axial strain occurs when both ends are constrained and the geometry demands it.
   Movement: quasi-static (inertia is negligible)
 
 Physical intuition:
-  Under a 1 N horizontal tip force (no gravity): tip deflects {deflection_1N:.4f} m
-  Under gravity alone (tip free): beam sags {sag_under_gravity:.4f} m
-  Category: {stiffness_category} — {'harder to bend' if deflection_1N < 0.01 else 'easier to bend'}"""
-
+  Under a 1 N horizontal tip force (no gravity): tip deflects {deflection_1N:.4f} m.
+  Gravity can deform the beam — account for it in your plan if relevant.
+  A cantilever held horizontal (gravity perpendicular to it): tip sags {sag_under_gravity:.4f} m under its own weight."""
 
 def describe_wall_constraints(ps) -> str:
-    """Wall description, or empty string if no walls."""
+    """Format wall geometry and friction for the LLM prompt. Returns "" if no walls."""
     if not ps.walls:
         return ""
-    return f"Walls (physical obstacles):\n{describe_walls(ps.walls)}"
+    inf_threshold = ps.rod_length * config.WALL_INF_MULTIPLIER
+    friction_str = (
+        "Perfectly sticky (beam cannot slide once in contact — both x and y constrained)"
+        if ps.friction else
+        "Perfectly slippery (beam slides freely along wall surfaces — only normal direction constrained)"
+    )
+    lines = [f"Walls (physical obstacles): {len(ps.walls)} total. Friction: {friction_str}"]
+    for i, w in enumerate(ps.walls):
+        n, d = w["n"], w["d"]
+        P0, P1 = w["P0"], w["P1"]
+        if n[1] > 0.5:
+            x_range = f" (x: {P0[0]:.3f} to {P1[0]:.3f})" if abs(P1[0] - P0[0]) <= inf_threshold else ""
+            desc = f"Floor at y={d / n[1]:.4f} m, outward normal along +y. Beam must stay above{x_range}."
+        elif n[1] < -0.5:
+            x_range = f" (x: {P0[0]:.3f} to {P1[0]:.3f})" if abs(P1[0] - P0[0]) <= inf_threshold else ""
+            desc = f"Ceiling at y={d / n[1]:.4f} m, outward normal along -y. Beam must stay below{x_range}."
+        elif n[0] > 0.5:
+            y_range = f" (y: {P0[1]:.3f} to {P1[1]:.3f})" if abs(P1[1] - P0[1]) <= inf_threshold else ""
+            desc = f"Left wall at x={d / n[0]:.4f} m, outward normal along +x. Beam must stay to the right{y_range}."
+        else:
+            y_range = f" (y: {P0[1]:.3f} to {P1[1]:.3f})" if abs(P1[1] - P0[1]) <= inf_threshold else ""
+            desc = f"Right wall at x={d / n[0]:.4f} m, outward normal along -x. Beam must stay to the left{y_range}."
+        lines.append(f"  Wall {i+1}: {desc}")
+    return "\n".join(lines)
 
-
-def describe_bc_constraints(ps) -> str:
-    """Boundary condition explanation — concrete statement of what is controlled vs. fixed."""
+def describe_bc_constraints(ps, q: list) -> str:
+    """Describes the s=1 end of the beam — the end the LLM does not control."""
+    nv = ps.nv
+    fx  = float(q[2 * (nv - 1)])
+    fy  = float(q[2 * (nv - 1) + 1])
+    dx  = fx - float(q[2 * (nv - 2)])
+    dy  = fy - float(q[2 * (nv - 2) + 1])
+    theta = float(np.arctan2(dy, dx))
     if ps.controlled_nodes == [0, 1]:
-        # With walls: only clamped end is controlled; other end free but wall-constrained
-        return """\
-Boundary conditions:
-  Controlled end (node 0): Position (x0, y0) and slope (θ) are set BY YOU.
-  Free end: Deforms freely under gravity and walls. Walls prevent penetration but do NOT clamp the position."""
+        return (
+            f"Boundary conditions (s=1 end, current position: ({fx:.4f}, {fy:.4f}) m, theta={theta:.4f} rad):\n"
+            f"  This end is free. It deforms under gravity and wall contact."
+        )
     else:
-        # Without walls: both ends are clamped (tip is fixed in space); only the middle deforms
-        # The fixed end stays at its initial position (0, -rod_length) with slope θ = 0
-        fixed_x = 0.0
-        fixed_y = -ps.rod_length
-        fixed_theta = 0.0
-        return f"""\
-Boundary conditions:
-  Controlled end (node 0): Position (x0, y0) and slope (θ) are set BY YOU.
-  Fixed end (opposite end): Clamped at position ({fixed_x:.4f}, {fixed_y:.4f}) m with slope θ = {fixed_theta:.4f} rad (pointing straight down). This end DOES NOT MOVE."""
+        return (
+            f"Boundary conditions:\n"
+            f"   s=1 end is permanently clamped at ({fx:.4f}, {fy:.4f}) m, "
+            f"theta={theta:.4f} rad. It DOES NOT MOVE. You only control the other end at s=0."
+        )
 
 
-def describe_controller_feedback(reaction_force: list) -> str:
-    """
-    Controller feedback force felt at the clamped end (nodes 0 and 1).
-
-    Args:
-        reaction_force: Full reaction force vector (2*nv elements).
-                       reaction_force[0:2] = force on node 0
-                       reaction_force[2:4] = force on node 1
-
-    Returns:
-        String describing the net feedback force and its interpretation.
-        Empty string if reaction_force is None.
-    """
+def describe_controller_feedback(reaction_force: list, ps, q: list) -> str:
+    """Reaction force and bending moment at the clamped end vs beam weight."""
     if reaction_force is None or len(reaction_force) < 4:
         return ""
 
-    # Extract forces on controlled nodes (0 and 1)
-    F0 = np.array(reaction_force[0:2])  # force on node 0
-    F1 = np.array(reaction_force[2:4])  # force on node 1
-
-    # Total reaction from beam on the two controlled nodes
+    F0 = np.array(reaction_force[0:2])
+    F1 = np.array(reaction_force[2:4])
     F_total = F0 + F1
+    Fx, Fy  = float(F_total[0]), float(F_total[1])
+    magnitude = float(np.sqrt(Fx**2 + Fy**2))
 
-    # What the controller feels (negative of reaction)
-    F_feedback = -F_total
+    # Bending moment about node 0 due to force on node 1: Mz = (r1 - r0) x F1
+    Mz = (q[2] - q[0]) * F1[1] - (q[3] - q[1]) * F1[0]
 
-    Fx, Fy = F_feedback[0], F_feedback[1]
-    magnitude = np.sqrt(Fx**2 + Fy**2)
-
-    # Direction description
-    directions = []
-    if Fx > 1e-6:
-        directions.append("pushing right")
-    elif Fx < -1e-6:
-        directions.append("pushing left")
-
-    if Fy > 1e-6:
-        directions.append("pushing up")
-    elif Fy < -1e-6:
-        directions.append("pushing down")
-
-    direction_str = " and ".join(directions) if directions else "no net force"
-
-    return f"""\
-Controller feedback (what the arm is feeling):
-  Net force: [{Fx:+.3f}, {Fy:+.3f}] N
-  Magnitude: {magnitude:.3f} N ({direction_str})"""
+    beam_weight = float(ps.m.sum() * abs(config.GRAVITY[1]))
+    Rx, Ry  = -Fx, -Fy  # force beam exerts back on arm (Newton's 3rd law)
+    Mz_arm  = -Mz        # moment felt by arm (Newton's 3rd law)
+    return "\n".join([
+        "Controller feedback at clamped end (s=0):",
+        f"  Force applied by robotic arm on DLO: [{Fx:+.3f}, {Fy:+.3f}] N   magnitude = {magnitude:.3f} N",
+        f"  Force felt by arm (DLO on arm): [{Rx:+.3f}, {Ry:+.3f}] N",
+        f"  Bending moment applied by arm on DLO: {Mz:+.4f} N*m",
+        f"  Bending moment felt by arm (DLO on arm): {Mz_arm:+.4f} N*m",
+        f"  Beam weight: {beam_weight:.3f} N (along negative y-axis)",
+        "  If the force applied by arm on DLO is close to beam weight, there is no significant external loads (wall contact, clamped tip, etc.).",
+    ])
 
 
 def describe_contact_regions(cx: list | None, cy: list | None, nv: int, walls: list) -> str:
-    """
-    Describe which parts of the beam are in contact with walls (by arc-length).
-
-    Args:
-        cx: Contact state for x-DOF. cx[i] = wall index or -1 (free). None if no walls.
-        cy: Contact state for y-DOF. cy[i] = wall index or -1 (free). None if no walls.
-        nv: Number of nodes.
-        walls: List of wall dicts with keys 'n' (normal), 'd' (distance).
-
-    Returns:
-        String describing contact regions by arc-length percentage.
-        Empty string if no contact or cx/cy are None.
-    """
-    if cx is None and cy is None:
+    """Enumerate nodes in contact with walls by arc-length. Walls numbered as in describe_wall_constraints."""
+    if not walls or (cx is None and cy is None):
         return ""
-
-    if not walls:
-        return ""
-
-    # Helper to describe wall by index
-    def wall_description(wall_idx):
-        if wall_idx < 0 or wall_idx >= len(walls):
-            return "unknown wall"
-        wall = walls[wall_idx]
-        n = wall["n"]
-        if abs(n[1]) > abs(n[0]):  # horizontal wall
-            return f"horizontal wall at y={wall['d']/n[1]:.4f} m"
-        else:  # vertical wall
-            return f"vertical wall at x={wall['d']/n[0]:.4f} m"
-
-    # Convert node indices to arc-length and group regions
-    lines = ["Wall contact status:"]
-
-    # X-contact regions
-    if cx is not None:
-        x_contact = [i for i, wall_idx in enumerate(cx) if wall_idx >= 0]
-        if x_contact:
-            regions_x = []
-            start = x_contact[0]
-            for i in range(1, len(x_contact)):
-                if x_contact[i] != x_contact[i-1] + 1:  # Gap detected
-                    end = x_contact[i-1]
-                    pct_start = (start / (nv - 1)) * 100
-                    pct_end = (end / (nv - 1)) * 100
-                    wall = cx[start]
-                    regions_x.append((pct_start, pct_end, wall))
-                    start = x_contact[i]
-            # Final region
-            end = x_contact[-1]
-            pct_start = (start / (nv - 1)) * 100
-            pct_end = (end / (nv - 1)) * 100
-            wall = cx[start]
-            regions_x.append((pct_start, pct_end, wall))
-
-            for pct_start, pct_end, wall_idx in regions_x:
-                wall_desc = wall_description(wall_idx)
-                lines.append(f"  Beam at {pct_start:.0f}%-{pct_end:.0f}% arc-length: x-DOF constrained ({wall_desc})")
-
-    # Y-contact regions
-    if cy is not None:
-        y_contact = [i for i, wall_idx in enumerate(cy) if wall_idx >= 0]
-        if y_contact:
-            regions_y = []
-            start = y_contact[0]
-            for i in range(1, len(y_contact)):
-                if y_contact[i] != y_contact[i-1] + 1:  # Gap detected
-                    end = y_contact[i-1]
-                    pct_start = (start / (nv - 1)) * 100
-                    pct_end = (end / (nv - 1)) * 100
-                    wall = cy[start]
-                    regions_y.append((pct_start, pct_end, wall))
-                    start = y_contact[i]
-            # Final region
-            end = y_contact[-1]
-            pct_start = (start / (nv - 1)) * 100
-            pct_end = (end / (nv - 1)) * 100
-            wall = cy[start]
-            regions_y.append((pct_start, pct_end, wall))
-
-            for pct_start, pct_end, wall_idx in regions_y:
-                wall_desc = wall_description(wall_idx)
-                lines.append(f"  Beam at {pct_start:.0f}%-{pct_end:.0f}% arc-length: y-DOF constrained ({wall_desc})")
-
+    lines = ["Wall contact:"]
+    for i in range(nv):
+        wx = cx[i] if cx is not None else -1
+        wy = cy[i] if cy is not None else -1
+        wall_idx = wx if wx >= 0 else wy
+        if wall_idx >= 0:
+            lines.append(f"  Contact with Wall#{wall_idx+1} at arc-length s={i / (nv - 1):.2f}")
     return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def describe_axial_stretch(axial_strain, ps) -> str:
+    """Warn the LLM when any edge strain exceeds config.AXIAL_STRAIN_THRESHOLD. Returns "" otherwise."""
+    if axial_strain is None:
+        return ""
+    max_strain = float(np.max(np.abs(axial_strain)))
+    if max_strain < config.AXIAL_STRAIN_THRESHOLD:
+        return ""
+    nv = ps.nv
+    lines = [
+        f"Warning — axial stretching detected (max strain: {max_strain*100:.1f}%):",
+        "  The DLO is being stretched or compressed significantly along its length.",
+        "  This happens when the controlled end is moved to a position that cannot be reached",
+        "  without deforming the beam axially. Large axial strain means the beam may behave",
+        "  unpredictably.",
+        # "  Per-edge strain (positive = stretched, negative = compressed):",
+    ]
+    # for i, strain in enumerate(axial_strain):
+    #         s_mid = (i + 0.5) / (nv - 1)
+    #         lines.append(f"    Edge at s={s_mid:.2f}: {strain*100:+.1f}%")
+    return "\n".join(lines)
 
 
 def describe_error_rejection(error_msg: str) -> str:
@@ -384,49 +247,12 @@ def describe_error_rejection(error_msg: str) -> str:
     if not error_msg:
         return ""
     return f"""\
-⚠️  PREVIOUS MOVE REJECTED — DO NOT REPEAT
+PREVIOUS MOVE REJECTED — DO NOT REPEAT
 
 Your last boundary condition was rejected because:
   {error_msg}
 
 Please adjust your values to satisfy the constraint and try again."""
-
-
-def describe_recent_trajectory(bc_history: list, shape_history: list, n_recent: int = 5) -> str:
-    """
-    Recent trajectory: last N moves showing progress or stagnation (arc-length, no node indices).
-    Shows position deltas to give the LLM a sense of direction and pace of change.
-    """
-    if not bc_history or not shape_history:
-        return "(no history yet)"
-
-    # Get last N moves
-    n = min(n_recent, len(bc_history))
-    recent_bcs = bc_history[-n:]
-    recent_shapes = shape_history[-n:]
-
-    lines = [f"Recent trajectory (last {n} moves):"]
-
-    # For each move, compute displacement of clamped end
-    for i, (bc, shape) in enumerate(zip(recent_bcs, recent_shapes)):
-        x0, y0, theta = bc
-        lines.append(f"  Move {i+1}: BC→({x0:+.4f}, {y0:+.4f}, θ={theta:+.4f} rad)")
-        if shape:
-            # Compute tip displacement from previous move (if exists)
-            if i > 0:
-                prev_shape = recent_shapes[i-1]
-                if len(shape) > 0 and len(prev_shape) > 0:
-                    tip_x, tip_y = shape[-1]
-                    prev_tip_x, prev_tip_y = prev_shape[-1]
-                    dx = tip_x - prev_tip_x
-                    dy = tip_y - prev_tip_y
-                    distance = np.sqrt(dx**2 + dy**2)
-                    direction = "down" if dy < -1e-6 else ("up" if dy > 1e-6 else "")
-                    direction += ("-left" if dx < -1e-6 else ("-right" if dx > 1e-6 else ""))
-                    lines.append(f"            → tip moved {distance:.4f} m {direction.strip()}")
-
-    return "\n".join(lines)
-
 
 # ---------------------------------------------------------------------------
 # Standalone test — python -m src.core.observation
@@ -437,34 +263,56 @@ _TEST_CASES = [
         "label": "Straight beam (initial position)",
         "bc":    [0.0, 0.0, 0.0],
         "nodes": [(0.0, 0.0), (0.0, -0.025), (0.0, -0.05), (0.0, -0.075), (0.0, -0.10)],
-        "walls": [{"n": [0., 1.], "d": -0.12,
-                   "P0": [-10., -0.12], "P1": [10., -0.12]}],
-        "level": "geometric",
+        "observable_nodes": [0, 1, 2, 3, 4],
+        "nv": 5,
+        "walls": [{"n": np.array([0., 1.]), "d": -0.12,
+                   "P0": np.array([-10., -0.12]), "P1": np.array([10., -0.12])}],
+        "controlled_nodes": [0, 1],
     },
     {
         "label": "C-shape in progress",
         "bc":    [0.0, -0.03, 0.4],
         "nodes": [(0.0, -0.03), (0.015, -0.05), (0.025, -0.075),
                   (0.02, -0.10), (0.005, -0.115)],
-        "walls": [{"n": [0., 1.], "d": -0.12,
-                   "P0": [-10., -0.12], "P1": [10., -0.12]}],
-        "level": "geometric",
+        "observable_nodes": [0, 1, 2, 3, 4],
+        "nv": 5,
+        "walls": [{"n": np.array([0., 1.]), "d": -0.12,
+                   "P0": np.array([-10., -0.12]), "P1": np.array([10., -0.12])}],
+        "controlled_nodes": [0, 1],
     },
     {
         "label": "Snake-L: beam entering vertical channel",
         "bc":    [0.0, -0.04, 0.0],
         "nodes": [(0.0, -0.04), (0.0, -0.065), (0.0, -0.09),
                   (0.005, -0.105), (0.02, -0.11)],
+        "observable_nodes": [0, 1, 2, 3, 4],
+        "nv": 5,
         "walls": [
-            {"n": [ 1.,  0.], "d": -0.01, "P0": [-0.01,  0.02], "P1": [-0.01, -0.12]},
-            {"n": [ 0.,  1.], "d": -0.12, "P0": [-0.01, -0.12], "P1": [ 0.12, -0.12]},
-            {"n": [-1.,  0.], "d": -0.12, "P0": [ 0.12, -0.12], "P1": [ 0.12, -0.10]},
-            {"n": [ 0., -1.], "d":  0.10, "P0": [ 0.12, -0.10], "P1": [ 0.01, -0.10]},
-            {"n": [-1.,  0.], "d": -0.01, "P0": [ 0.01, -0.10], "P1": [ 0.01,  0.02]},
+            {"n": np.array([ 1.,  0.]), "d": -0.01, "P0": np.array([-0.01,  0.02]), "P1": np.array([-0.01, -0.12])},
+            {"n": np.array([ 0.,  1.]), "d": -0.12, "P0": np.array([-0.01, -0.12]), "P1": np.array([ 0.12, -0.12])},
+            {"n": np.array([-1.,  0.]), "d": -0.12, "P0": np.array([ 0.12, -0.12]), "P1": np.array([ 0.12, -0.10])},
+            {"n": np.array([ 0., -1.]), "d":  0.10, "P0": np.array([ 0.12, -0.10]), "P1": np.array([ 0.01, -0.10])},
+            {"n": np.array([-1.,  0.]), "d": -0.01, "P0": np.array([ 0.01, -0.10]), "P1": np.array([ 0.01,  0.02])},
         ],
-        "level": "geometric",
+        "controlled_nodes": [0, 1],
     },
 ]
+
+
+class _MockPS:
+    """Minimal physical system mock covering all describe_* functions."""
+    rod_length      = 0.1
+    friction        = False
+    r0              = 1e-2
+    rho             = 1000.0
+    EI              = 1e6 * np.pi * (1e-2)**4 / 4   # Y * pi * r0^4 / 4
+
+    def __init__(self, tc):
+        self.walls           = tc["walls"]
+        self.nv              = tc["nv"]
+        self.observable_nodes = tc["observable_nodes"]
+        self.controlled_nodes = tc["controlled_nodes"]
+        self.m               = np.full(tc["nv"], self.rho * np.pi * self.r0**2 * self.rod_length / tc["nv"])
 
 
 def main():
@@ -473,9 +321,41 @@ def main():
         print(f"\n{sep}")
         print(f"TEST: {tc['label']}")
         print(f"{sep}")
-        print(f"Wall description:\n  {describe_walls(tc['walls'])}\n")
-        print("Node description:")
-        print(describe_nodes(tc["nodes"], tc["bc"], level=tc["level"]))
+
+        ps     = _MockPS(tc)
+        q_flat = [v for xy in tc["nodes"] for v in xy]
+        kappa  = np.zeros(tc["nv"])  # straight beam: zero curvature everywhere
+
+        print(describe_beam_physics(ps))
+        print()
+        print(describe_wall_constraints(ps) or "(no walls)")
+        print()
+        print(describe_bc_constraints(ps, q_flat))
+        print()
+        print(describe_current_shape(q_flat, ps, kappa=kappa, bc=tc["bc"]))
+        print()
+
+        # one-step dummy history (uses previous bc/shape as prior step)
+        prev_bc    = [[b * 0.5 for b in tc["bc"]]]
+        prev_shape = [[(x * 0.5, y * 0.5) for x, y in tc["nodes"]]]
+        prev_kappa = [list(kappa)]
+        prev_error = [42.0]
+        print(describe_history(prev_bc, prev_shape, ps, prev_error, kappa_history=prev_kappa))
+
+        print(describe_error_rejection("Node 0 too close to wall (clearance 0.001 m < 0.004 m)."))
+
+    # describe_controller_feedback and describe_contact_regions — tested once with dummy data
+    print(f"\n{sep}")
+    print("TEST: controller feedback + contact regions")
+    print(f"{sep}")
+    ps0    = _MockPS(_TEST_CASES[0])
+    q0     = [v for xy in _TEST_CASES[0]["nodes"] for v in xy]
+    rf     = [0.1, -0.5, 0.05, -0.3] + [0.0] * (2 * ps0.nv - 4)
+    print(describe_controller_feedback(rf, ps0, q0))
+    print()
+    cx = [-1, -1, 0, 0, -1]
+    cy = [-1, -1, -1, -1, 0]
+    print(describe_contact_regions(cx, cy, ps0.nv, ps0.walls))
 
 
 if __name__ == "__main__":

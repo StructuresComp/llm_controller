@@ -77,6 +77,8 @@ def convert(raw: dict, output_path: Path) -> None:
                     for line in f:
                         if line.strip():
                             snap = json.loads(line)
+                            if snap.get("type") == "header":
+                                continue
                             q_raw = snap["q"]
                             nodes = _nodes_from_q(q_raw, nv, physics_type)
                             nodes_n = [[x * scale, y * scale, z * scale] for x, y, z in nodes]

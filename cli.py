@@ -39,7 +39,7 @@ def parse_args():
         type=str,
         default="",
         metavar="SHAPE",
-        help="Target benchmark name: C, U, S, L, snake_L, tip_reach, or any registered case.",
+        help="Target benchmark name (any registered case in src/benchmarks/cases/).",
     )
     parser.add_argument(
         "--mode",
@@ -120,8 +120,7 @@ def _print_startup_summary(args, ps, cfg) -> None:
                   clamp, moving node 0 would just translate the whole beam under
                   gravity instead of bending it.
     """
-    from src.core.observation import describe_walls
-    sep = "─" * 65
+    sep = "=" * 65
     tol = getattr(cfg, "TOLERANCE_DISTANCE", None) or ps.rod_length * 1e-3
 
     print(sep)
@@ -129,14 +128,13 @@ def _print_startup_summary(args, ps, cfg) -> None:
     print(sep)
 
     if ps.walls:
-        h_note = f"  [--H {abs(args.H)} → y = -{abs(args.H):.4f} m]" if args.H is not None else ""
-        print(f"Walls        : {len(ps.walls)} segment(s) — {describe_walls(ps.walls)}{h_note}")
+        h_note = f"  [--H {abs(args.H)} -> y = -{abs(args.H):.4f} m]" if args.H is not None else ""
+        print(f"Walls        : {len(ps.walls)} segment(s){h_note}")
     else:
         print("Walls        : none")
 
-    # Describe control topology semantically (no node indices)
     print("Control topology:")
-    print("  Clamped end (node 0): YOU control position (x0, y0) and slope (θ) each iteration")
+    print("  Clamped end (node 0): YOU control position (x0, y0) and slope (theta) each iteration")
     if ps.walls:
         print("  Free end: Can deform freely; walls prevent penetration")
     else:
@@ -200,8 +198,9 @@ def main():
     # no walls → [0,1,nv-2,nv-1]).
     if args.target:
         bm = get_benchmark(args.target)
-        if bm.walls is not None:
-            config.WALLS = bm.walls
+        if bm.walls:
+            print(f"Adding {len(bm.walls)} wall(s) specific to case '{args.target}' on top of config.WALLS.")
+            config.WALLS = config.WALLS + bm.walls
 
     if args.H is not None:
         H = abs(args.H)
@@ -213,6 +212,7 @@ def main():
 
     # Step 6 — initialize trajectory disk writer and build initial state.
     config_writer = ConfigWriter(run_name=config.RUN_NAME)
+    config_writer.write_header(ps, args.target)
     state  = initial_controller_state(physical_system=ps, target_shape=args.target, config_writer=config_writer)
 
     # Step 7 — run the control loop.
@@ -225,7 +225,7 @@ def main():
     # Step 8a — print orchestrator plan (if in plan mode)
     if config.ORCHESTRATOR_MODE == "plan" and result.get("plan"):
         print("\n" + "="*70)
-        print("🧠 ORCHESTRATOR PLAN (from LLM planning phase)")
+        print("ORCHESTRATOR PLAN (from LLM planning phase)")
         print("="*70)
         print(result["plan"])
         print("="*70)
@@ -238,7 +238,6 @@ def main():
     final_err  = result.get("eval_result", {}).get("error_percent", None)
     print(f"\nTarget     : {result['target_shape'] or '(none)'}")
     print(f"Solved     : {solved}" + (f"  (error={final_err:.2f}%)" if final_err is not None else ""))
-    print(f"LLM judged : {result['converged']}  (recorded for analysis; does not control termination)")
     print(f"Iterations : {len(result['iteration_log'])} / {config.MAX_ITERATIONS}")
 
     if result["iteration_log"]:
@@ -250,7 +249,7 @@ def main():
             tip_y     = entry["tip_y"]
             status = " [CONVERGED]" if (iteration == len(result["iteration_log"]) and result["converged"]) else ""
             print(f"  {iteration:3d}.  x0={decision['x0']:+.4f}  y0={decision['y0']:+.4f}  "
-                  f"θ={decision['theta']:+.4f}  → tip: ({tip_x:+.6f}, {tip_y:+.6f}){status}")
+                  f"theta={decision['theta']:+.4f}  -> tip: ({tip_x:+.6f}, {tip_y:+.6f}){status}")
 
     print(f"\nTrajectory snapshots   : {config_writer.snapshot_count}  (streamed to {config_writer.filepath.name})")
 

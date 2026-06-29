@@ -3,24 +3,23 @@
 # ---------------------------------------------------------------------------
 # Orchestrator LangGraph sub-graph: planner_node → decision_node.
 #
-# planner_node  — writes a strategy to state["plan"] on the first call in
-#                 "plan" mode; no-op otherwise.
-# decision_node — always runs; appends state["plan"] to the prompt (empty
-#                 string in myopic mode = no effect); calls LLM twice:
-#                 (1) BC decision with _BC_SCHEMA
-#                 (2) convergence assessment with _CONVERGED_SCHEMA
-#                 Both results merged into a single atomic output.
+# planner_node  — writes or revises state["plan"] based on ORCHESTRATOR_MODE
+#                 and iteration counter; no-op in myopic mode.
+#                 "plan":   runs only at iteration 0.
+#                 "replan": runs every REPLAN_FREQ iterations (overwrites plan).
+# decision_node — always runs; calls LLM once with _BC_SCHEMA for BC decision;
+#                 convergence is determined deterministically from eval_result.
 #
 # INPUT/OUTPUT MANIFEST:
 # ---------------------------------------------------------------------------
 # planner_node:
-#   Input:  state["plan"], state["target_shape"], state["physical_system"]
+#   Input:  state["plan"], state["iteration"], state["target_shape"], state["physical_system"]
 #   Output: state["plan"]
 #
 # decision_node:
-#   Input:  state["shape_history"], state["bc_history"], state["plan"],
+#   Input:  state["shape_history"], state["bc_history"],
 #           state["eval_result"], state["physical_system"], state["target_shape"],
-#           state["iteration_log"]
+#           state["plan"], state["iteration_log"]
 #   Output: state["decision"] {x0, y0, theta}
 #           state["converged"] bool
 #           state["orchestrator_prompt"] str (for JSONL traceability)
@@ -36,7 +35,7 @@
 from langgraph.graph import END, StateGraph
 
 from src.core import config
-from src.core.prompt_builder import build_decision_prompt, build_plan_prompt
+from src.core.prompt_builder import build_planner_prompt, build_decision_prompt
 from src.llm.llm import call_llm, call_llm_with_tool
 from src.models.state_llm_control import ControllerState
 
@@ -50,8 +49,8 @@ from src.models.state_llm_control import ControllerState
 _BC_SCHEMA = {
     "name": "set_boundary_condition",
     "description": (
-        "Set the next boundary condition for the beam simulation. "
-        "Specify the target position and angle of the controlled end (node 0)."
+        "Set the next boundary condition for the DLO. "
+        "Specify the target position (x0, y0) and angle (theta) of the controlled end at s=0."
     ),
     "input_schema": {
         "type": "object",
@@ -67,57 +66,86 @@ _BC_SCHEMA = {
             "theta": {
                 "type": "number",
                 "description": (
-                    "Target angle at node 0 (radians, counter-clockwise from -Y axis). "
-                    "0 = straight down, pi/2 = pointing right, -pi/2 = pointing left."
+                    "Target angle at node 0 (radians, counter-clockwise from +X axis, standard math convention). "
+                    "0 = pointing right, pi/2 = pointing up, -pi/2 = pointing straight down."
                 ),
-            },
-        },
-        "required": ["x0", "y0", "theta"],
-    },
-}
-
-# Convergence assessment schema
-_CONVERGED_SCHEMA = {
-    "name": "assess_convergence",
-    "description": "Assess whether the DLO has reached the target shape.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "converged": {
-                "type": "boolean",
-                "description": "True if the current shape matches the target well enough.",
             },
             "reason": {
                 "type": "string",
-                "description": "One sentence explaining the assessment.",
+                "description": "One sentence explaining why this boundary condition was chosen.",
             },
         },
-        "required": ["converged", "reason"],
+        "required": ["x0", "y0", "theta", "reason"],
     },
 }
-
 
 # ---------------------------------------------------------------------------
 # 3. PROMPTS
 # ---------------------------------------------------------------------------
 
 _PLAN_SYSTEM = (
-    "You are an expert in controlling elastic beams. Your task is to press a deformable "
-    "beam against a wall and deform it into a target shape by manipulating the position "
-    "and angle at the controlled end. Think step-by-step about beam mechanics: bending "
-    "energy, gravity, contact with the wall, and which moves will curl the beam toward "
-    "the desired shape."
+    "You are an expert planner for controlling an elastic deformable linear object (DLO), "
+    "modeled as a beam.\n"
+    "A robot controls the position and angle of the clamped end at arc-length s=0.\n"
+    "The other end of the DLO has arc-length s=1 (normalized by length).\n"
+    "\n"
+    "The goal is to deform the DLO into a target shape or satisfy a target task specified "
+    "in the user prompt.\n"
+    "\n"
+    "Your role is to create a high-level control plan, not to issue the next boundary "
+    "condition directly.\n"
+    "The decision agent will later issue the actual boundary condition commands — "
+    "your role is strategy only.\n"
+    "\n"
+    "Use the physical information provided in the user prompt, including DLO length, stiffness, "
+    "gravity, current shape, target shape, contact constraints, walls, obstacles, and boundary "
+    "conditions.\n"
+    "\n"
+    "Reason in terms of mechanics: bending energy, geometric feasibility, gravity, contact, "
+    "friction if provided, and how changing the controlled-end position and angle will propagate "
+    "deformation along the DLO.\n"
+    "Be mindful of how theta is defined — refer to the coordinate system in the user prompt.\n"
+    "\n"
+    "Produce a concise strategy describing how to deform the DLO toward the target.\n"
+    "Leverage boundary conditions (clamped end) or walls (if any), gravity, and the elastic "
+    "deformation of the DLO.\n"
+    "\n"
+    "FORMAT RULES — strictly enforced:\n"
+    "- Describe a linear sequence of directional intents. Do not number them, do not label them, "
+    " do not write fallback chains (e.g., 'Step 2K-ALT: if that fails, try Step 2L-ALT').\n"
+    "- No conditional branching. Do not write 'if X then Y else Z'. "
+    "The decision agent observes the current state fresh each iteration and executes your plan.\n"
+    "- No iteration counts. Do not specify how many moves a phase should take.\n"
+    "\n"
 )
 
 _DECISION_SYSTEM = (
-    "You are controlling an elastic beam. Your job is to issue the next boundary condition "
-    "move by calling the 'set_boundary_condition' tool.\n\n"
-    "TOOL SCHEMA: set_boundary_condition\n"
-    "  x0 (number): target x-position of clamped end (meters)\n"
-    "  y0 (number): target y-position of clamped end (meters)\n"
-    "  theta (number): target angle in radians (0 = straight down, π/2 = right, -π/2 = left)\n\n"
-    "Think about beam mechanics: which moves will bend it toward the target shape? "
-    "When does it contact constraints? Should you backtrack if progress stalled?"
+    "You are controlling an elastic deformable linear object (DLO), modeled as a beam.\n"
+    "The goal is to deform the DLO into a target shape or satisfy a target task specified "
+    "in the user prompt.\n"
+    "A robot holds the clamped end of the DLO at arc-length s=0.\n"
+    "The other end of the DLO has arc-length (normalized by length) s=1.\n"
+    "\n"
+    "You must command the next boundary condition at s=0 by calling the set_boundary_condition tool.\n"
+    "\n"
+    "The controllable boundary variables are the clamped-end position (x0, y0) and angle theta at s=0.\n"
+    "Be mindful of how theta is defined — refer to the coordinate system in the user prompt.\n"
+    "Deformation is restricted to the X-Y plane. Gravity acts in the negative Y direction.\n"
+    "\n"
+    "Use the physical information provided in the user prompt, including DLO length, stiffness, "
+    "gravity, current shape, target shape, contact constraints, walls, obstacles, and boundary "
+    "conditions at the other end.\n"
+    "\n"
+    "Your role in this mode is to decide the next boundary condition, not to write a long-term plan.\n"
+    "Choose a physically plausible incremental action that is likely to reduce the mismatch between "
+    "the current DLO shape and the target shape while respecting constraints.\n"
+    "\n"
+    "Any move is executed smoothly by the physics tool, which interpolates the boundary condition "
+    "linearly from its current value to your target. However, large changes in position or angle "
+    "can introduce nonlinear coupling effects in the DLO's response — the DLO may not deform as "
+    "expected. Issue moves that are physically motivated rather than arbitrarily large.\n"
+    "\n"
+    "You must call the set_boundary_condition tool exactly once."
 )
 
 
@@ -125,6 +153,7 @@ _DECISION_SYSTEM = (
 # 4. HELPERS
 # ---------------------------------------------------------------------------
 
+# Leaving it as is for now for future enhancements. But we do not use the function below.
 def _detect_stagnation(bc_history: list, tol: float = 1e-4) -> bool:
     """Return True if the last few BCs are nearly identical (no progress)."""
     if len(bc_history) < 3:
@@ -142,11 +171,16 @@ def _detect_stagnation(bc_history: list, tol: float = 1e-4) -> bool:
 # ---------------------------------------------------------------------------
 
 def planner_node(state: ControllerState) -> dict:
-    """Generate a high-level plan on the first call in plan mode; no-op otherwise."""
-    if config.ORCHESTRATOR_MODE != "plan" or state["plan"]:
+    """Generate or revise plan based on mode and iteration counter; no-op in myopic mode."""
+
+    if config.ORCHESTRATOR_MODE == "myopic":
+        return {}
+    if config.ORCHESTRATOR_MODE == "plan" and state["iteration"] > 0:
+        return {}
+    if config.ORCHESTRATOR_MODE == "replan" and state["iteration"] % config.REPLAN_FREQ != 0:
         return {}
 
-    prompt = build_plan_prompt(state)
+    prompt = build_planner_prompt(state)
 
     if config.DEBUG:
         print("\n" + "="*70)
@@ -163,8 +197,7 @@ def planner_node(state: ControllerState) -> dict:
 
 
 def decision_node(state: ControllerState) -> dict:
-    """Issue the next BC decision and assess convergence."""
-    # Build prompt from modular sub-prompts (Tier 1 only in Phase 2; Tier 2-4 TBD)
+    """Issue the next BC decision; convergence is read from eval_result."""
     prompt = build_decision_prompt(state)
 
     if config.DEBUG:
@@ -184,61 +217,31 @@ def decision_node(state: ControllerState) -> dict:
         tool_name   = "set_boundary_condition",
         system      = _DECISION_SYSTEM,
     )
+    # Coerce numeric fields: some providers return numbers as strings despite the schema.
+    for key in ("x0", "y0", "theta"):
+        decision[key] = float(decision[key])
 
     # Print decision in real-time
     iteration_num = len(state["iteration_log"]) + 1
     print(f"\n[Iteration {iteration_num}] Orchestrator decision:")
-    print(f"  x0 = {decision['x0']:+.6f} m  |  y0 = {decision['y0']:+.6f} m  |  θ = {decision['theta']:+.6f} rad")
+    print(f"  x0 = {decision['x0']:+.6f} m  |  y0 = {decision['y0']:+.6f} m  |  theta = {decision['theta']:+.6f} rad")
+    print(f"  Reason: {decision.get('reason', '(none)')}")
 
-    # Convergence assessment (TODO: move to prompt_builder in Phase 3)
-    ps = state["physical_system"]
-    eval_result = state.get("eval_result", {})
-
-    # Build minimal convergence prompt
-    convergence_prompt = f"TARGET SHAPE: {state['target_shape']}\n"
-    if eval_result:
-        convergence_prompt += (
-            f"ERROR: {eval_result.get('error_percent', 100.0):.1f}%\n"
-            f"ASSESSMENT: {eval_result.get('diagnostics', '')}\n\n"
-        )
-    convergence_prompt += (
-        f"Has the beam been deformed into a {state['target_shape']} shape? "
-        f"Judge by the error percentage and diagnostics above. "
-        f"Be strict: the shape must clearly match the target."
-    )
-    if config.DEBUG:
-        print("\n" + "="*70)
-        print("[CONVERGENCE SYSTEM]")
-        print("="*70)
-        print("You are a structural mechanics expert. Judge whether the current beam deformation matches the target shape.")
-        print("\n[CONVERGENCE PROMPT]")
-        print("="*70)
-        print(convergence_prompt)
-        print("="*70 + "\n")
-    convergence = call_llm_with_tool(
-        prompt = convergence_prompt,
-        tool_schema = _CONVERGED_SCHEMA,
-        tool_name   = "assess_convergence",
-        system      = "You are a structural mechanics expert. Judge whether the current beam deformation matches the target shape.",
-    )
-
-    # Print convergence assessment in real-time
-    if convergence["converged"]:
-        print(f"  ✓ CONVERGED: {convergence['reason']}")
+    converged = state.get("eval_result", {}).get("solved", False)
+    if converged:
+        print(f"  checkmark CONVERGED (eval_result.solved = True)")
     else:
-        print(f"  → Not converged: {convergence['reason']}")
+        print(f"  -> Not converged")
 
-    updates: dict = {
-        "decision":  decision,
-        "converged": convergence["converged"],
-        "orchestrator_prompt": prompt,  # Store for JSONL traceability
+    # # Stagnation can be detected via _detect_stagnation(state["bc_history"]) and returned
+    # # as {"plan": ""} to trigger a forced replan. Commented out to keep orchestrator mode
+    # # fixed for the entire run — cross-LLM comparison requires a stable mode.
+
+    return {
+        "decision":           decision,
+        "converged":          converged,
+        "orchestrator_prompt": prompt,  # stored for JSONL traceability
     }
-
-    # Replan if stagnating and ALLOW_REPLAN is set
-    if config.ALLOW_REPLAN and _detect_stagnation(state["bc_history"]):
-        updates["plan"] = ""   # clears plan → planner_node will regenerate next call
-
-    return updates
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +249,7 @@ def decision_node(state: ControllerState) -> dict:
 # ---------------------------------------------------------------------------
 
 def build_orchestrator_graph():
-    """Compile the orchestrator sub-graph: planner_node → decision_node."""
+    """Compile the orchestrator sub-graph: planner_node -> decision_node."""
     graph = StateGraph(ControllerState)
 
     graph.add_node("planner",  planner_node)
@@ -269,7 +272,7 @@ def main():
     from src.models.state_llm_control import initial_controller_state
 
     ps    = make_physical_system(config)
-    state = initial_controller_state(ps, target_shape="C", bc_target=[0.0, -0.05, 0.5])
+    state = initial_controller_state(ps, target_shape="C")
 
     graph   = build_orchestrator_graph()
     updates = graph.invoke(state)

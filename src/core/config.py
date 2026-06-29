@@ -21,13 +21,13 @@
 LOG_LLM_CALLS = True   # True = log every prompt + response alongside the run JSON
 RUN_NAME      = ""     # stem for output files: <RUN_NAME>.json + <RUN_NAME>.log
                        # "" = auto-generate run_<timestamp>_<pid> for each file
-DEBUG         = False  # True = print LLM prompts and responses to terminal
+DEBUG         = True  # True = print LLM prompts and responses to terminal
 
 qwen = False  # if True, use Qwen models (only available via Ollama for now)
 if qwen:
     LLM_PROVIDER = "ollama"
     MODEL        = "qwen2.5:14b"
-    MAX_TOKENS   = 4096
+    MAX_TOKENS   = 8000
     # Ollama-specific settings (ignored when provider is not "ollama")
     OLLAMA_BASE_URL    = "https://assure-roots-hostels-excessive.trycloudflare.com"
     OLLAMA_TIMEOUT     = 300   # seconds
@@ -35,7 +35,8 @@ if qwen:
 else:
     LLM_PROVIDER = "anthropic"
     MODEL        = "claude-haiku-4-5"
-    MAX_TOKENS   = 2048   # hard upper bound on output tokens per LLM call
+    # MODEL        = "claude-sonnet-4-6"
+    MAX_TOKENS   = 8000   # hard upper bound on output tokens per LLM call
 
 # ===========================================================================
 # 2. AGENT PERCEPTION & CONTROL
@@ -48,22 +49,24 @@ else:
 #     "geometric"  — positions + tangent angles + curvature signs + total turning angle
 #     "full"       — geometric + wall contact status per node + arc length distribution
 # ---------------------------------------------------------------------------
-OBSERVATION_LEVEL = "geometric"
+INCLUDE_GEOMETRY       = True    # True = include tangent angles + curvature in the prompt
+INCLUDE_FEEDBACK       = False   # include controller reaction force in the prompt
+INCLUDE_CONTACT        = False   # include wall contact regions in the prompt
+INCLUDE_AXIAL_STRETCH  = True    # warn the LLM when axial strain exceeds AXIAL_STRAIN_THRESHOLD
+AXIAL_STRAIN_THRESHOLD = 0.05    # fraction (0.05 = 5%): warn if any edge strain exceeds this
 
 # ---------------------------------------------------------------------------
 # 2b. Orchestrator perception & history
 # ---------------------------------------------------------------------------
-N_PARTIAL  = 5    # nodes sent to orchestrator (subsampled from full NV under "Physical parameters")
-K_HISTORY  = 5    # number of (shape, BC) pairs kept in rolling history
+N_PARTIAL  = 7   # nodes sent to orchestrator (subsampled from full NV under "Physical parameters")
+K_HISTORY  = 3    # number of (shape, BC) pairs kept in rolling history; set to 0 or negative to disable
 
 # ---------------------------------------------------------------------------
 # 2d. Control loop
 # ---------------------------------------------------------------------------
-CHECK_SHAPE_REFLECTION = False  # if True, also test reversed traversal and take min error
-
-ORCHESTRATOR_MODE = "plan"   # "plan" (grounded) or "myopic" (reactive)
-ALLOW_REPLAN      = False    # if True, orchestrator can discard and redo the plan
-MAX_ITERATIONS    = 500       # hard stop on orchestrator → programmer cycles
+ORCHESTRATOR_MODE    = "myopic" # "plan" (grounded), "myopic" (reactive), or "replan" (fresh plan every iteration)
+REPLAN_FREQ          = 5        # replan every Nth iteration in "replan" mode (1 = every iteration)
+MAX_ITERATIONS       = 1000     # hard stop on orchestrator → programmer cycles
 
 # ===========================================================================
 # 3. SIMULATION & VISUALIZATION
@@ -75,12 +78,13 @@ MAX_ITERATIONS    = 500       # hard stop on orchestrator → programmer cycles
 #     geometries. make_physical_system(config) reads these once at startup.
 # ---------------------------------------------------------------------------
 PHYSICS_TYPE = "beam"  # "beam" (2D elastic beam) | "rod" (3D elastic rod, under development)
-NV          = 21       # number of vertices (nodes); total DOFs = 2 * NV
-RHO         = 10000    # density (kg/m³)
+NV          = 15       # number of vertices (nodes); total DOFs = 2 * NV
+RHO         = 1000     # density (kg/m³)
 Y           = 1e6      # Young's modulus (Pa)
 R0          = 1e-2     # cross-sectional radius (m)
-ROD_LENGTH  = 0.1      # total beam length (m)
-VISC        = 1000.0   # viscous damping coefficient (Pa·s)
+ROD_LENGTH  = 0.2      # total beam length (m)
+VISC        = 10.0   # viscous damping coefficient (Pa·s)
+GRAVITY     = [1e-3, -9.8]  # gravitational acceleration vector [gx, gy] (m/s^2); small gx breaks symmetry
 
 # ---------------------------------------------------------------------------
 # 3b. Environment
@@ -98,13 +102,26 @@ TOLERANCE_DISTANCE = 0.02 * ROD_LENGTH  # min clearance (m) the controlled nodes
 
 BOUNDARY_VELOCITY       = 0.05   # translational speed of node 0 (m/s)
 BOUNDARY_ANGLE_VELOCITY = 0.05   # rotational speed of node 0 (rad/s)
-DT                      = 0.01   # time step size for physics integration (s); smaller = more accurate but slower
 FRICTION                = False  # True = wall fixes x and y; False = wall fixes y only (frictionless)
+WALL_INF_MULTIPLIER     = 10     # wall spans > this × ROD_LENGTH are treated as unbounded in prompts
 
 # ---------------------------------------------------------------------------
-# 3c. Visualization
+# 3c. Time stepping
+#     DT        — base time step for physics integration; smaller = more accurate but slower.
+#     ADAPT_DT  — if True, retry a failed-convergence call with DT * DT_MULTIPLIER until
+#                 DT drops below DT_MIN, then give up.
+#     DT_MULTIPLIER — factor applied to DT on each retry (must be < 1).
+#     DT_MIN        — smallest DT allowed before the retry loop gives up (must be < DT).
 # ---------------------------------------------------------------------------
-PLOT_IMAGE = 1   # 1 = show beam plots during simulation, 0 = suppress
+DT            = 0.01   # base time step (s)
+ADAPT_DT      = True    # retry with smaller dt on failed convergence
+DT_MULTIPLIER = 0.5     # halve dt on each retry
+DT_MIN        = 0.0001  # give up below this dt
+
+# ---------------------------------------------------------------------------
+# 3d. Visualization
+# ---------------------------------------------------------------------------
+PLOT_IMAGE = 5   # 0 = no plots; N >= 1 = plot every Nth physics step
 
 # ---------------------------------------------------------------------------
 # 3d. Data storage

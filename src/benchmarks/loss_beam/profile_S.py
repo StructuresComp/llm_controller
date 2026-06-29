@@ -1,21 +1,21 @@
 """
-S-shape curvature profile: full-sine, one inflection point, net turn ≈ 0.
+S-shape curvature profile: two opposite bowls via full-sine with terminal curls.
 
 Exports:
-    profile_s(s_norm, amplitude)  — ideal turning angle at normalised arc-length s
-    fit_s(s_norm, dtheta)         — fit amplitude to observed turning angles
+    kappa_s(s_norm, rod_length, As, Aend, sig) — curvature density as function of arc-length
 """
 
 import numpy as np
 
 
-def profile_s(s_norm: np.ndarray, amplitude: float = 0.5) -> np.ndarray:
-    """theta*(s) = amplitude * sin(2π*s)  — symmetric S, net turn = 0."""
-    return amplitude * np.sin(2 * np.pi * s_norm)
+def kappa_s(s_norm: np.ndarray, rod_length: float = 1.0, As: float = 10.0, Aend: float = 3.0, sig: float = 0.30) -> np.ndarray:
+    """
+    Curvature function for S-shape.
 
-
-def fit_s(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
-    """Least-squares projection of dtheta onto sin(2π*s)."""
-    basis = np.sin(2 * np.pi * s_norm)
-    denom = float(np.dot(basis, basis)) + 1e-12
-    return {"amplitude": float(np.dot(dtheta, basis) / denom)}
+    kappa = 2*tan(theta/2) / dL, normalized by rod_length.
+    """
+    base         = As * np.sin(2.0 * np.pi * s_norm)
+    bottom_curl  = np.exp(-(s_norm / sig)**2)
+    top_curl     = np.exp(-((1.0 - s_norm) / sig)**2)
+    kappa_raw    = base + Aend * (bottom_curl - top_curl)
+    return kappa_raw / rod_length

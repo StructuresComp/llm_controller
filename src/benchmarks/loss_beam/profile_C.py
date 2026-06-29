@@ -1,20 +1,18 @@
 """
-C-shape curvature profile: linear ramp = constant curvature = circular arc.
+C-shape curvature profile: realistic C with terminal curls.
 
 Exports:
-    profile_c(s_norm, total_turn)  — ideal turning angle at normalised arc-length s
-    fit_c(s_norm, dtheta)          — fit total_turn to observed turning angles
+    kappa_c(s_norm, kc0, Ac, sigc) — curvature density as function of arc-length
 """
 
 import numpy as np
 
 
-def profile_c(s_norm: np.ndarray, total_turn: float = 1.0) -> np.ndarray:
-    """theta*(s) = total_turn * s  — constant curvature throughout."""
-    return total_turn * s_norm
+def kappa_c(s_norm: np.ndarray, rod_length: float = 1.0, kc0: float = 4.5, Ac: float = 3.0, sigc: float = 0.15) -> np.ndarray:
+    """
+    Curvature function for C-shape.
 
-
-def fit_c(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
-    """Least-squares fit of total_turn to observed turning angles."""
-    denom = float(np.dot(s_norm, s_norm)) + 1e-12
-    return {"total_turn": float(np.dot(s_norm, dtheta) / denom)}
+    kappa = 2*tan(theta/2) / dL, normalized by rod_length.
+    """
+    kappa_raw = kc0 + Ac * (np.exp(-(s_norm/sigc)**2) + np.exp(-((1.0-s_norm)/sigc)**2))
+    return kappa_raw / rod_length
