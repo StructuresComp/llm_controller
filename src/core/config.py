@@ -21,22 +21,42 @@
 LOG_LLM_CALLS = True   # True = log every prompt + response alongside the run JSON
 RUN_NAME      = ""     # stem for output files: <RUN_NAME>.json + <RUN_NAME>.log
                        # "" = auto-generate run_<timestamp>_<pid> for each file
-DEBUG         = True  # True = print LLM prompts and responses to terminal
+DEBUG         = False  # True = print LLM prompts and responses to terminal
 
-qwen = False  # if True, use Qwen models (only available via Ollama for now)
-if qwen:
+ollama = True  # if True, use ollama models
+if ollama:
     LLM_PROVIDER = "ollama"
-    MODEL        = "qwen2.5:14b"
-    MAX_TOKENS   = 8000
+    MODEL        = "olmo2:13b" # "qwen2.5-coder:14b"
+    # Ollama models available now (as of 07/05/2026). Local/smaller models are
+    # less reliable at tool-calling than frontier models (Claude, GPT, Gemini) --
+    # TOOL_CALL_ATTEMPTS below exists to retry past occasional malformed tool-call
+    # responses from these; it should rarely be needed with frontier models.
+    # "qwen2.5:14b"        -- reliable tool-calling # Aggressive
+    # "qwen2.5-coder:14b"  -- unreliable tool-calling
+    # "phi4"               -- no native tool-calling support; falls back to JSON-prompt emulation
+    # "mistral-nemo"       -- reliable tool-calling
+    # "gemma3:12b"         -- reliable tool-calling # Conservative
+    # "olmo2:13b"          -- reliable tool-calling # Aggressive
+
     # Ollama-specific settings (ignored when provider is not "ollama")
-    OLLAMA_BASE_URL    = "https://assure-roots-hostels-excessive.trycloudflare.com"
+    OLLAMA_BASE_URL    = "https://passenger-dod-cafe-placed.trycloudflare.com"
     OLLAMA_TIMEOUT     = 300   # seconds
     OLLAMA_TEMPERATURE = 0.0
 else:
     LLM_PROVIDER = "anthropic"
     MODEL        = "claude-haiku-4-5"
-    # MODEL        = "claude-sonnet-4-6"
-    MAX_TOKENS   = 8000   # hard upper bound on output tokens per LLM call
+    MODEL        = "claude-opus-4-8" # "claude-sonnet-4-6"
+
+    LLM_PROVIDER = "gemini"
+    MODEL        = "gemini-3.5-flash"
+    # LLM_PROVIDER = "openai"
+    # MODEL        = "gpt-5.5"
+
+MAX_TOKENS   = 20000 # Maximum allowed tokens per LLM call
+TOOL_CALL_ATTEMPTS = 5   # 0 (or <1) = quit immediately if a tool-call LLM response fails to parse
+                         # >=1 = retry that many additional times before quitting
+                         # Mainly needed for local Ollama models (some occasionally fail to
+                         # produce a valid tool call); frontier models rarely need retries.
 
 # ===========================================================================
 # 2. AGENT PERCEPTION & CONTROL
@@ -45,28 +65,29 @@ else:
 # ---------------------------------------------------------------------------
 # 2a. Orchestrator observation level
 #     Controls what geometric information is sent to the orchestrator.
-#     "positions"  — raw (x, y) coordinates of observable nodes only
-#     "geometric"  — positions + tangent angles + curvature signs + total turning angle
-#     "full"       — geometric + wall contact status per node + arc length distribution
+#     Raw (x, y) coordinates of observable nodes are always included.
+#     The following flags control whether additional info is included in the prompt.
 # ---------------------------------------------------------------------------
 INCLUDE_GEOMETRY       = True    # True = include tangent angles + curvature in the prompt
+INCLUDE_AXIAL_STRETCH  = True    # warn the LLM the DLO is stretching too much (axial strain>=AXIAL_STRAIN_THRESHOLD)
 INCLUDE_FEEDBACK       = False   # include controller reaction force in the prompt
 INCLUDE_CONTACT        = False   # include wall contact regions in the prompt
-INCLUDE_AXIAL_STRETCH  = True    # warn the LLM when axial strain exceeds AXIAL_STRAIN_THRESHOLD
-AXIAL_STRAIN_THRESHOLD = 0.05    # fraction (0.05 = 5%): warn if any edge strain exceeds this
+AXIAL_STRAIN_THRESHOLD = 0.05    # fraction (0.05 = 5%): warn if any edge's axial strain exceeds this
+SHOW_ERROR_PERCENT     = True    # True = show error % in prompts; False = hide it (forces geometric reasoning)
 
 # ---------------------------------------------------------------------------
 # 2b. Orchestrator perception & history
 # ---------------------------------------------------------------------------
-N_PARTIAL  = 7   # nodes sent to orchestrator (subsampled from full NV under "Physical parameters")
-K_HISTORY  = 3    # number of (shape, BC) pairs kept in rolling history; set to 0 or negative to disable
+N_PARTIAL  = 15  # nodes sent to orchestrator (subsampled from full NV under "Physical parameters")
+K_HISTORY  = 5   # number of (shape, BC) pairs kept in rolling history; set to 0 or negative to disable
 
 # ---------------------------------------------------------------------------
 # 2d. Control loop
 # ---------------------------------------------------------------------------
 ORCHESTRATOR_MODE    = "myopic" # "plan" (grounded), "myopic" (reactive), or "replan" (fresh plan every iteration)
 REPLAN_FREQ          = 5        # replan every Nth iteration in "replan" mode (1 = every iteration)
-MAX_ITERATIONS       = 1000     # hard stop on orchestrator → programmer cycles
+MAX_ITERATIONS       = 100      # hard stop on orchestrator → programmer cycles
+MAX_ITERATIONS_WITH_REJECTIONS = MAX_ITERATIONS * 2  # hard stop on ALL orchestrator decisions, including rejected BCs
 
 # ===========================================================================
 # 3. SIMULATION & VISUALIZATION
@@ -103,7 +124,7 @@ TOLERANCE_DISTANCE = 0.02 * ROD_LENGTH  # min clearance (m) the controlled nodes
 BOUNDARY_VELOCITY       = 0.05   # translational speed of node 0 (m/s)
 BOUNDARY_ANGLE_VELOCITY = 0.05   # rotational speed of node 0 (rad/s)
 FRICTION                = False  # True = wall fixes x and y; False = wall fixes y only (frictionless)
-WALL_INF_MULTIPLIER     = 10     # wall spans > this × ROD_LENGTH are treated as unbounded in prompts
+WALL_INF_MULTIPLIER     = 10     # wall spans > this x ROD_LENGTH are treated as unbounded in prompts
 
 # ---------------------------------------------------------------------------
 # 3c. Time stepping
@@ -116,12 +137,14 @@ WALL_INF_MULTIPLIER     = 10     # wall spans > this × ROD_LENGTH are treated a
 DT            = 0.01   # base time step (s)
 ADAPT_DT      = True    # retry with smaller dt on failed convergence
 DT_MULTIPLIER = 0.5     # halve dt on each retry
-DT_MIN        = 0.0001  # give up below this dt
+DT_MIN        = 0.002   # give up below this dt or retry based on QUIT_ON_DT_FAILURE setting
+QUIT_ON_DT_FAILURE = False # True = end the run if dt bottoms out without converging
+                           # False = reject the BC instead and let the orchestrator retry
 
 # ---------------------------------------------------------------------------
 # 3d. Visualization
 # ---------------------------------------------------------------------------
-PLOT_IMAGE = 5   # 0 = no plots; N >= 1 = plot every Nth physics step
+PLOT_IMAGE = 0  # 0 = no plots; N >= 1 = plot every Nth physics step
 
 # ---------------------------------------------------------------------------
 # 3d. Data storage

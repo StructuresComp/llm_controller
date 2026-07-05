@@ -4,15 +4,23 @@
 # LangGraph master workflow.
 #
 # Topology:
-#   [START] → orchestrator → safety ──(violation)──→ orchestrator
-#                  ↑               └──(safe)──→ programmer → evaluator
-#                  └──────────────────────────────────(loop)──┘
+#   [START] → orchestrator ──(LLM tool call failed, all retries exhausted)──→ [END]
+#                  ↑        └──(ok)──→ safety ──(violation)──→ orchestrator
+#                  |                       └──(safe)──→ programmer ──(dt exhausted, QUIT_ON_DT_FAILURE=False)──→ orchestrator
+#                  |                                        |──(dt exhausted, QUIT_ON_DT_FAILURE=True)──→ [END]
+#                  |                                        └──(success)──→ evaluator
+#                  └───────────────────────────────────────────────────────────────(loop)──┘
 #
-# The orchestrator is itself a compiled sub-graph (planner → decision).
-# The loop runs until state["converged"] is True, state["error"] is set
-# by the programmer (physics failure), or LangGraph's recursion_limit is hit.
-# Safety violations route back to the orchestrator — they never reach the
-# programmer or evaluator, so they do not count as iterations.
+# The orchestrator is itself a compiled sub-graph (planner → decision). decision_node
+# retries a failed-to-parse LLM tool call up to config.TOOL_CALL_ATTEMPTS times before
+# giving up; exhausting all attempts ends the run immediately (skips safety/programmer/
+# evaluator entirely, since there's no valid decision to act on).
+# The loop runs until state["converged"] is True, an unrecoverable dt failure
+# ends the run (QUIT_ON_DT_FAILURE=True), state["attempt_count"] (incremented every
+# decision, including rejections) exceeds MAX_ITERATIONS_WITH_REJECTIONS, or
+# LangGraph's recursion_limit is hit.
+# Safety violations and recoverable dt-failure rejections both route back to the
+# orchestrator — they never reach the evaluator, so they do not count as iterations.
 # ---------------------------------------------------------------------------
 
 from langgraph.graph import END, StateGraph
@@ -25,9 +33,29 @@ from src.agents.programmer_agent import programmer_node
 from src.agents.evaluator_agent import evaluator_node
 
 
+def _after_orchestrator(state: ControllerState) -> str:
+    """Route after orchestrator: end if the LLM tool call failed after all retries
+    (config.TOOL_CALL_ATTEMPTS exhausted), else safety."""
+    return "end" if state.get("error") else "safety"
+
+
 def _after_safety(state: ControllerState) -> str:
-    """Route after safety check: back to orchestrator on violation, else programmer."""
+    """Route after safety check: back to orchestrator on violation, else programmer.
+
+    Hard-stops if total attempts (successful iterations + rejections) exceed
+    MAX_ITERATIONS_WITH_REJECTIONS, so a stuck LLM can't loop on rejections forever.
+    """
+    if state.get("attempt_count", 0) >= config.MAX_ITERATIONS_WITH_REJECTIONS:
+        return "end"
     return "orchestrator" if state.get("error") else "programmer"
+
+
+def _after_programmer(state: ControllerState) -> str:
+    """Route after programmer: end on unrecoverable dt failure (or QUIT_ON_DT_FAILURE),
+    back to orchestrator on a recoverable dt-failure rejection, else evaluator."""
+    if state.get("error"):
+        return "end" if config.QUIT_ON_DT_FAILURE else "orchestrator"
+    return "evaluator"
 
 
 def _should_continue(state: ControllerState) -> str:
@@ -39,8 +67,6 @@ def _should_continue(state: ControllerState) -> str:
 
     Hard stop: if MAX_ITERATIONS is reached, end regardless of solve status.
     """
-    if state.get("error"):
-        return "end"
     if state.get("eval_result", {}).get("solved", False):
         return "end"
     if len(state.get("iteration_log", [])) >= config.MAX_ITERATIONS:
@@ -57,13 +83,21 @@ def build_controller_graph():
     graph.add_node("evaluator",    evaluator_node)
 
     graph.set_entry_point("orchestrator")
-    graph.add_edge("orchestrator", "safety")
+    graph.add_conditional_edges(
+        "orchestrator",
+        _after_orchestrator,
+        {"safety": "safety", "end": END},
+    )
     graph.add_conditional_edges(
         "safety",
         _after_safety,
-        {"orchestrator": "orchestrator", "programmer": "programmer"},
+        {"orchestrator": "orchestrator", "programmer": "programmer", "end": END},
     )
-    graph.add_edge("programmer", "evaluator")
+    graph.add_conditional_edges(
+        "programmer",
+        _after_programmer,
+        {"orchestrator": "orchestrator", "evaluator": "evaluator", "end": END},
+    )
     graph.add_conditional_edges(
         "evaluator",
         _should_continue,

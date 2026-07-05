@@ -72,7 +72,10 @@ def programmer_node(state: ControllerState) -> dict:
         print(f"  [programmer] Failed at dt={dt/config.DT_MULTIPLIER:.6f}. Retrying at dt={dt:.6f}.")
 
     if result["status"] == "failed_convergence":
-        return {"error": f"Programmer: {result['message']}"}
+        error = f"Programmer: {result['message']}"
+        if not config.QUIT_ON_DT_FAILURE:
+            return {"error": error, "dt_failure_rejected": True}
+        return {"error": error}
 
     q_new              = result["q_new"]
     q_history          = result.get("q_history", [q_new])
@@ -123,6 +126,7 @@ def programmer_node(state: ControllerState) -> dict:
         "iteration":         iteration_num,
         "iteration_log":     state["iteration_log"] + [iteration_entry],
         "error":             None,
+        "dt_failure_rejected": False,
     }
 
 

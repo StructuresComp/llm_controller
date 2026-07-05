@@ -25,6 +25,7 @@ Each loss type has two functions:
 import numpy as np
 from typing import Callable
 
+from src.core import config
 from src.tools.Discrete_Elastic_Beams import compute_kappa_dimensional
 
 
@@ -104,7 +105,8 @@ def describe_curvature_loss(q, ps, benchmark) -> str:
                 f"target curvature = {tgt:+.1f} /m,  "
                 f"gap = {cur - tgt:+.1f} /m"
             )
-    lines.append(f"Overall error: {error:.1f}%  (0% = perfect curvature match)")
+    if config.SHOW_ERROR_PERCENT:
+        lines.append(f"Overall error: {error:.1f}%  (0% = perfect curvature match)")
     return "\n".join(lines)
 
 
@@ -173,7 +175,7 @@ def describe_node_loss(q, ps, benchmark) -> str:
 
     actual = q.reshape(nv, 2)
     x0, y0 = float(actual[0, 0]), float(actual[0, 1])
-    theta  = float(np.arctan2(actual[1, 0] - actual[0, 0], -(actual[1, 1] - actual[0, 1])))
+    theta  = float(np.arctan2(actual[1, 1] - actual[0, 1], actual[1, 0] - actual[0, 0]))
     ref    = build_ideal_from_edge_profile(
         benchmark.reference_kappa_fn, nv, ps.rod_length, x0=x0, y0=y0, theta=theta
     )
@@ -197,7 +199,8 @@ def describe_node_loss(q, ps, benchmark) -> str:
             f"target ({tx:+.4f}, {ty:+.4f}),  "
             f"dist = {dist:.4f} m"
         )
-    lines.append(f"Overall error: {error:.1f}%  (0% = perfect position match)")
+    if config.SHOW_ERROR_PERCENT:
+        lines.append(f"Overall error: {error:.1f}%  (0% = perfect position match)")
     return "\n".join(lines)
 
 
@@ -231,6 +234,6 @@ def describe_tip_loss(q, ps, benchmark) -> str:
         "",
         f"Tip position:  current ({cx:+.4f}, {cy:+.4f}) m",
         f"Target:        ({target_x:+.4f}, {target_y:+.4f}) m",
-        f"Distance:      {dist:.4f} m  ({error:.1f}% of rod length)",
+        f"Distance:      {dist:.4f} m" + (f"  ({error:.1f}% of rod length)" if config.SHOW_ERROR_PERCENT else ""),
     ]
     return "\n".join(lines)

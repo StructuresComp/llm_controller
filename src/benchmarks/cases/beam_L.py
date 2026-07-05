@@ -1,5 +1,6 @@
 """
-L-shape benchmark: straight section followed by a sharp ~90° bend near the tip.
+L-shape benchmark: straight first arm, a concentrated ~90° bend centered at 65%
+arc-length, then a shorter straight second arm to the tip.
 
 Run standalone:
     python -m src.benchmarks.cases.beam_L
@@ -16,7 +17,11 @@ class LShape(BenchmarkCase):
     loss_type          = "curvature"
     reference_kappa_fn = staticmethod(kappa_l)
     target_description = (
-        "Straight along the first 65% of the beam, then a concentrated 90° cosine-bump turn centred at 65% arc-length. "
+        "Bend the DLO into an L-shape. Target curvature values along the arc-length "
+        "are provided below. "
+        "Straight for the first ~52.5% of the beam, then a concentrated 90-degree "
+        "cosine-bump turn centered at 65% arc-length (spanning roughly 52.5%-77.5%), "
+        "followed by a straight ~22.5% second arm to the tip. "
         "Invariant to translation and rotation — a rotated or shifted L still scores 0%."
     )
     success_threshold  = 0.05

@@ -23,11 +23,12 @@ class ArcShape(BenchmarkCase):
     loss_type          = "curvature"
     reference_kappa_fn = staticmethod(kappa_arc)
     target_description = (
-        "A uniform circular arc with constant positive curvature along the entire beam. "
-        "Positive curvature means the bend is CCW as we go from s=0 (control node) to s=1. "
-        "Negative curvature means CW turn. "
-        "The radius of curvature equals half the beam length, giving a total turning angle of "
-        "2 radians (about 114 degrees)."
+        "Bend the DLO into a uniform circular arc. Target curvature values along the "
+        "arc-length are provided below. "
+        "Curvature is constant (the same everywhere) and positive, meaning the bend is "
+        "CCW from s=0 (control node) to s=1 — negative curvature would mean a CW turn. "
+        "The radius of curvature equals half the beam length. "
+        "Invariant to translation and rotation — a rotated or shifted arc still scores 0%."
     )
     success_threshold  = 0.05
 

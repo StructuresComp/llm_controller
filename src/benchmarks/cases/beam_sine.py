@@ -1,5 +1,6 @@
 """
-Sine-wave benchmark: half-sine curvature profile extracted from ideal nodes.
+Sine-wave benchmark: beam follows a half-sine-shaped path; curvature is derived
+numerically from the ideal shape's node positions (not a hand-designed function).
 
 Run standalone:
     python -m src.benchmarks.cases.beam_sine
@@ -17,8 +18,12 @@ class SineCase(BenchmarkCase):
     physics_type = "beam"
     loss_type = "curvature"
     target_description = (
-        "A smooth half-sine wave: starting straight, gradually curving then "
-        "returning to straight. Arc length ≈ 0.10 m, amplitude 0.03 m."
+        "Bend the DLO into a smooth arc resembling half of a sine wave. Target curvature "
+        "values along the arc-length are provided below. "
+        "Starts and ends straight (zero curvature), with a single bump peaking at the "
+        "midpoint (negative curvature throughout — bends like a hill, not a valley). "
+        "Horizontal span ~0.10 m, arc length ~0.12 m, amplitude ~0.03 m. "
+        "Invariant to translation and rotation — a rotated or shifted curve still scores 0%."
     )
     success_threshold = 0.05
 
@@ -32,7 +37,12 @@ class SineCase(BenchmarkCase):
         self.reference_kappa_fn = compute_kappa_dimensional(ideal.flatten(), n, dL)
 
     def reference_fn(self, x0: float = 0.0, y0: float = 0.0, theta: float = -np.pi / 2, ps=None):
-        return self.ideal_nodes - self.ideal_nodes[0] + np.array([x0, y0])
+        centered     = self.ideal_nodes - self.ideal_nodes[0]
+        native_theta = np.arctan2(centered[1, 1], centered[1, 0])
+        delta        = theta - native_theta
+        rotation     = np.array([[np.cos(delta), -np.sin(delta)], [np.sin(delta), np.cos(delta)]])
+        rotated      = centered @ rotation.T
+        return rotated + np.array([x0, y0])
 
 
 register(SineCase())

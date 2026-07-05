@@ -16,8 +16,11 @@ class CShape(BenchmarkCase):
     loss_type          = "curvature"
     reference_kappa_fn = staticmethod(kappa_c)
     target_description = (
-        "Uniform curvature throughout with stronger curls at both endpoints. "
-        "All bending in one direction. "
+        "Bend the DLO into a C-shape. Target curvature values along the arc-length "
+        "are provided below. "
+        "Overall, curvature is roughly uniform in the middle with stronger curls at "
+        "both endpoints (symmetric, same strength at each tip). All bending is in one "
+        "direction — curvature never changes sign. "
         "Invariant to translation and rotation — a rotated or shifted C still scores 0%."
     )
     success_threshold  = 0.05

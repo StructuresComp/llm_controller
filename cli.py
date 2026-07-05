@@ -18,6 +18,7 @@
 #   python3 cli.py --target tip_reach --length 0.12
 #   python3 cli.py --target snake_L --config experiments/my_run.py
 #   python3 cli.py --target C --mode beam
+#   python3 cli.py --target C --provider ollama --model qwen2.5:14b --run-name qwen_C
 # ---------------------------------------------------------------------------
 
 import argparse
@@ -66,6 +67,27 @@ def parse_args():
         default=None,
         metavar="L",
         help="Override ROD_LENGTH (m).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Override config.MODEL (e.g. 'qwen2.5:14b', 'gpt-5.4', 'claude-haiku-4-5').",
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Override config.LLM_PROVIDER (e.g. 'anthropic', 'openai', 'ollama').",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Override config.RUN_NAME — output file stem: logs/<NAME>.jsonl + logs/<NAME>.log.",
     )
     parser.add_argument(
         "--config",
@@ -124,7 +146,7 @@ def _print_startup_summary(args, ps, cfg) -> None:
     tol = getattr(cfg, "TOLERANCE_DISTANCE", None) or ps.rod_length * 1e-3
 
     print(sep)
-    print(f"LLM CONTROLLER  target={args.target or '(none)'}  model={cfg.MODEL}  mode={cfg.ORCHESTRATOR_MODE}")
+    print(f"LLM CONTROLLER  target={args.target or '(none)'}  provider={cfg.LLM_PROVIDER}  model={cfg.MODEL}  mode={cfg.ORCHESTRATOR_MODE}")
     print(sep)
 
     if ps.walls:
@@ -165,6 +187,16 @@ def main():
     # Apply --debug flag to config
     if args.debug:
         config.DEBUG = True
+
+    # CLI overrides for LLM provider/model/run-name — applied after any --config
+    # overlay so these flags always win. Meant for parallel sweep scripts that
+    # vary model/provider/run_name per subprocess without generating overlay files.
+    if args.model is not None:
+        config.MODEL = args.model
+    if args.provider is not None:
+        config.LLM_PROVIDER = args.provider
+    if args.run_name is not None:
+        config.RUN_NAME = args.run_name
 
     # Downstream imports are deferred to here so the overlay is in effect before
     # any src module reads from config at import time.

@@ -61,6 +61,7 @@ python3 cli.py --target tip_reach                # tip-reach benchmark
 python3 cli.py --target C --length 0.15           # override rod length
 python3 cli.py --target snake_L --config my_run.py  # custom config overlay
 python3 cli.py --target C --mode beam            # explicit physics type
+python3 cli.py --target C --provider ollama --model qwen2.5:14b --run-name qwen_C  # override LLM provider/model/run name
 ```
 
 **CLI arguments:**
@@ -71,8 +72,13 @@ python3 cli.py --target C --mode beam            # explicit physics type
 | `--mode MODE` | Physics type: `beam` (default) or `rod` (under development). Overrides `PHYSICS_TYPE` in config. |
 | `--H DEPTH` | Add a single horizontal floor at `y = -\|H\|` m. Sign is ignored — `--H 0.15` and `--H -0.15` both place the floor at y = −0.15 m. Overrides `WALLS` in config. |
 | `--length L` | Override `ROD_LENGTH` (m). |
+| `--model NAME` | Override `MODEL` in config (e.g. `qwen2.5:14b`, `gpt-5.4`, `claude-haiku-4-5`). |
+| `--provider NAME` | Override `LLM_PROVIDER` in config (e.g. `anthropic`, `openai`, `ollama`). |
+| `--run-name NAME` | Override `RUN_NAME` in config — sets the output file stem: `logs/<NAME>.jsonl` + `logs/<NAME>.log`. |
 | `--config FILE` | Path to a Python config overlay file (see [Configuration](#configuration)). |
 | `--debug` | Force `DEBUG = True` for this run (prints all LLM prompts and responses). |
+
+`--model`/`--provider`/`--run-name` are handy for scripting a parameter sweep via `subprocess` — build a list of `cli.py` invocations varying provider/model/target, each with a distinct `--run-name` so parallel runs don't clobber each other's log files, without needing to generate a config overlay file per run.
 
 ### Visualize a run
 
@@ -229,6 +235,12 @@ python3 cli.py --target C --config experiments/qwen_plan_C.py
 ## LLM Layer
 
 Provider implementations live in the [`llm_wrapper`](https://github.com/agentic-writing/llm_wrapper) package (installed via pip). `src/llm/llm.py` is a thin adapter that reads provider/model from config and delegates to it. When `LOG_LLM_CALLS = True`, every prompt and response is appended to `logs/llm_<timestamp>.log`.
+
+Supported `LLM_PROVIDER` values: `anthropic`, `openai`, `gemini`, `ollama`, `fake`. The `gemini` provider needs an extra SDK not pulled in by `requirements.txt` — install it separately if you set `LLM_PROVIDER = "gemini"`:
+
+```bash
+pip install "google-genai>=0.8.0"
+```
 
 ---
 

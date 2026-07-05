@@ -89,7 +89,8 @@ def describe_history(
             if kappas is not None and 0 < node_idx < nv - 1:
                 line += f",  curvature = {kappas[j]:+.2f} /meter"
             lines.append(line)
-        lines.append(f"  Error: {error_history[i]:.1f}%")
+        if config.SHOW_ERROR_PERCENT:
+            lines.append(f"  Error: {error_history[i]:.1f}%")
         lines.append("")
     return "\n".join(lines)
 
@@ -253,6 +254,15 @@ Your last boundary condition was rejected because:
   {error_msg}
 
 Please adjust your values to satisfy the constraint and try again."""
+
+
+def describe_dt_failure_rejection() -> str:
+    """Static rejection message shown when a BC caused the physics solver to fail even at the smallest allowed timestep."""
+    return """\
+PREVIOUS BC REJECTED — DO NOT REPEAT
+
+The previous boundary condition led to high strains in the DLO, and our numerical \
+tool estimates non-realistic configurations as a result. Avoid this type of BC."""
 
 # ---------------------------------------------------------------------------
 # Standalone test — python -m src.core.observation

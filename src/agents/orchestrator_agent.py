@@ -23,6 +23,9 @@
 #   Output: state["decision"] {x0, y0, theta}
 #           state["converged"] bool
 #           state["orchestrator_prompt"] str (for JSONL traceability)
+#           state["error"] None on success; set (and "decision" omitted) if the LLM
+#             tool call still fails to parse after config.TOOL_CALL_ATTEMPTS retries —
+#             workflow.py routes that straight to END.
 # ---------------------------------------------------------------------------
 #
 # Section order:
@@ -79,6 +82,57 @@ _BC_SCHEMA = {
     },
 }
 
+# Extended BC schema — experimental, not wired up yet.
+# Adds two analysis fields BEFORE the BC values to encourage sequential reasoning:
+#   1. error_analysis   — LLM diagnoses the dominant mismatch (region, sign, magnitude)
+#   2. correction_intent — LLM states what BC change will address it
+# Field order matters: autoregressive generation means these are produced before x0/y0/theta,
+# softly conditioning the BC values on the prior diagnosis.
+# Replaces 'reason' (which is post-hoc) with structured pre-action reasoning.
+# To activate: pass _BC_SCHEMA_EXTENDED to call_llm_with_tool in decision_node.
+_BC_SCHEMA_EXTENDED = {
+    "name": "set_boundary_condition",
+    "description": (
+        "Set the next boundary condition for the DLO. "
+        "First diagnose the current error, then state your correction intent, "
+        "then specify the target position and angle."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "error_analysis": {
+                "type": "string",
+                "description": (
+                    "Describe the dominant mismatch between current and target shape."
+                ),
+            },
+            "reason": {
+                "type": "string",
+                "description": (
+                    "State which BC variable (x0, y0, or theta) you will change, "
+                    "in which direction, and why it addresses the error."
+                ),
+            },
+            "x0": {
+                "type": "number",
+                "description": "Target x-position of node 0 (meters). Positive = right.",
+            },
+            "y0": {
+                "type": "number",
+                "description": "Target y-position of node 0 (meters). Negative = below origin.",
+            },
+            "theta": {
+                "type": "number",
+                "description": (
+                    "Target angle at node 0 (radians, counter-clockwise from +X axis, standard math convention). "
+                    "0 = pointing right, pi/2 = pointing up, -pi/2 = pointing straight down."
+                ),
+            },
+        },
+        "required": ["error_analysis", "reason", "x0", "y0", "theta"],
+    },
+}
+
 # ---------------------------------------------------------------------------
 # 3. PROMPTS
 # ---------------------------------------------------------------------------
@@ -94,12 +148,6 @@ _PLAN_SYSTEM = (
     "\n"
     "Your role is to create a high-level control plan, not to issue the next boundary "
     "condition directly.\n"
-    "The decision agent will later issue the actual boundary condition commands — "
-    "your role is strategy only.\n"
-    "\n"
-    "Use the physical information provided in the user prompt, including DLO length, stiffness, "
-    "gravity, current shape, target shape, contact constraints, walls, obstacles, and boundary "
-    "conditions.\n"
     "\n"
     "Reason in terms of mechanics: bending energy, geometric feasibility, gravity, contact, "
     "friction if provided, and how changing the controlled-end position and angle will propagate "
@@ -109,6 +157,18 @@ _PLAN_SYSTEM = (
     "Produce a concise strategy describing how to deform the DLO toward the target.\n"
     "Leverage boundary conditions (clamped end) or walls (if any), gravity, and the elastic "
     "deformation of the DLO.\n"
+    "\n"
+    "Before planning, mentally reconstruct the current shape from the node positions "
+    "and reason about what sequence of moves will guide it toward the target.\n"
+    "\n"
+    "Moving s=0 has the most direct effect on nodes near s=0; the influence attenuates "
+    "toward s=1, which responds only through elastic propagation — to shape the far end, "
+    "first shape the near end and let deformation propagate incrementally.\n"
+    "theta sets the departure angle at s=0 and most directly controls curvature near s=0. "
+    "(x0, y0) repositions the controlled end — its effect on the rest of the beam depends "
+    "on other boundary conditions and constraints such as walls.\n"
+    "The order of bending matters: if the beam bends in the wrong direction early, "
+    "plan to reverse it before committing to the final configuration.\n"
     "\n"
     "FORMAT RULES — strictly enforced:\n"
     "- Describe a linear sequence of directional intents. Do not number them, do not label them, "
@@ -127,23 +187,27 @@ _DECISION_SYSTEM = (
     "The other end of the DLO has arc-length (normalized by length) s=1.\n"
     "\n"
     "You must command the next boundary condition at s=0 by calling the set_boundary_condition tool.\n"
+    "You will apply control actions repeatedly until the target shape is achieved — "
+    "each decision moves the DLO one step closer.\n"
     "\n"
     "The controllable boundary variables are the clamped-end position (x0, y0) and angle theta at s=0.\n"
     "Be mindful of how theta is defined — refer to the coordinate system in the user prompt.\n"
     "Deformation is restricted to the X-Y plane. Gravity acts in the negative Y direction.\n"
     "\n"
-    "Use the physical information provided in the user prompt, including DLO length, stiffness, "
-    "gravity, current shape, target shape, contact constraints, walls, obstacles, and boundary "
-    "conditions at the other end.\n"
-    "\n"
     "Your role in this mode is to decide the next boundary condition, not to write a long-term plan.\n"
-    "Choose a physically plausible incremental action that is likely to reduce the mismatch between "
-    "the current DLO shape and the target shape while respecting constraints.\n"
+    "Prefer small, deliberate moves — large changes can cause unpredictable deformation, "
+    "and you may need many iterations to correct course.\n"
+    "Before deciding, mentally reconstruct the current shape from the node positions, "
+    "then reason about how your move will change it.\n"
     "\n"
-    "Any move is executed smoothly by the physics tool, which interpolates the boundary condition "
-    "linearly from its current value to your target. However, large changes in position or angle "
-    "can introduce nonlinear coupling effects in the DLO's response — the DLO may not deform as "
-    "expected. Issue moves that are physically motivated rather than arbitrarily large.\n"
+    "Moving s=0 has the most direct effect on nodes near s=0; the influence attenuates "
+    "toward s=1, which responds only through elastic propagation — to shape the far end, "
+    "first shape the near end and let deformation propagate incrementally.\n"
+    "theta sets the departure angle at s=0 and most directly controls curvature near s=0. "
+    "(x0, y0) repositions the controlled end — its effect on the rest of the beam depends "
+    "on other boundary conditions and constraints such as walls.\n"
+    "The order of bending matters: if the beam bends in the wrong direction early, "
+    "you may need to reverse course before the target shape is reachable.\n"
     "\n"
     "You must call the set_boundary_condition tool exactly once."
 )
@@ -197,7 +261,14 @@ def planner_node(state: ControllerState) -> dict:
 
 
 def decision_node(state: ControllerState) -> dict:
-    """Issue the next BC decision; convergence is read from eval_result."""
+    """
+    Issue the next BC decision; convergence is read from eval_result.
+
+    Retries the LLM tool call up to config.TOOL_CALL_ATTEMPTS additional times if the
+    response fails to parse (malformed JSON/tool call — see llm_wrapper's Ollama JSON-
+    prompt fallback). Each attempt counts toward attempt_count. If every attempt fails,
+    returns {"error": ...} instead of raising; workflow.py routes this straight to END.
+    """
     prompt = build_decision_prompt(state)
 
     if config.DEBUG:
@@ -210,16 +281,39 @@ def decision_node(state: ControllerState) -> dict:
         print(prompt)
         print("="*70 + "\n")
 
-    # BC decision — schema-enforced, never free JSON
-    decision = call_llm_with_tool(
-        prompt      = prompt,
-        tool_schema = _BC_SCHEMA,
-        tool_name   = "set_boundary_condition",
-        system      = _DECISION_SYSTEM,
-    )
-    # Coerce numeric fields: some providers return numbers as strings despite the schema.
-    for key in ("x0", "y0", "theta"):
-        decision[key] = float(decision[key])
+    attempt_count = state.get("attempt_count", 0)
+    max_attempts  = max(config.TOOL_CALL_ATTEMPTS, 0) + 1
+    decision      = None
+    last_error    = None
+
+    for attempt in range(max_attempts):
+        attempt_count += 1
+        try:
+            # BC decision — schema-enforced, never free JSON
+            decision = call_llm_with_tool(
+                prompt      = prompt,
+                tool_schema = _BC_SCHEMA,
+                tool_name   = "set_boundary_condition",
+                system      = _DECISION_SYSTEM,
+            )
+            # Coerce numeric fields: some providers return numbers as strings despite the schema.
+            for key in ("x0", "y0", "theta"):
+                decision[key] = float(decision[key])
+            break
+        except Exception as e:
+            last_error = e
+            decision   = None
+            if config.DEBUG:
+                if attempt + 1 < max_attempts:
+                    print(f"  [decision] Tool call failed (attempt {attempt + 1}/{max_attempts}): {e} -- retrying.")
+                else:
+                    print(f"  [decision] Tool call failed (attempt {attempt + 1}/{max_attempts}): {e} -- giving up.")
+
+    if decision is None:
+        return {
+            "error": f"Orchestrator: LLM tool call failed after {max_attempts} attempt(s): {last_error}",
+            "attempt_count": attempt_count,
+        }
 
     # Print decision in real-time
     iteration_num = len(state["iteration_log"]) + 1
@@ -241,6 +335,8 @@ def decision_node(state: ControllerState) -> dict:
         "decision":           decision,
         "converged":          converged,
         "orchestrator_prompt": prompt,  # stored for JSONL traceability
+        "attempt_count":      attempt_count,
+        "error":              None,  # clear any stale rejection from a previous cycle
     }
 
 

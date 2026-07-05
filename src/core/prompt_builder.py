@@ -18,6 +18,7 @@ from src.core.observation import (
     describe_current_shape,
     describe_history,
     describe_error_rejection,
+    describe_dt_failure_rejection,
     describe_controller_feedback,
     describe_contact_regions,
     describe_axial_stretch,
@@ -35,7 +36,10 @@ Coordinate system:
   Y-axis: points upward
   Z-axis: points out of the plane (toward you)
   theta: angle of the controlled end at s=0, measured counter-clockwise from the +X axis (standard math convention).
-         0 = pointing right, pi/2 = pointing up, -pi/2 = pointing straight down (initial state), pi = pointing left."""
+         0 = pointing right, pi/2 = pointing up, -pi/2 = pointing straight down (initial state), pi = pointing left.
+  Curvature: positive = CCW turning from s=0 to s=1, negative = CW.
+             Example: s=0 at (0,0), s=0.5 at (1,-1), s=1 at (2,0) - and, therefore, theta (at s = 0) = -pi/4 - is a CCW (positive curvature) arc.
+             But, s=0 at (0,0), s=0.5 at (1,1), s=1 at (2,0) - and, therefore, theta (at s = 0) = pi/4 - is a  CW (negative curvature) arc."""
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +93,12 @@ def _build_base_prompt(state) -> list:
             kappa_history=kappa_hist,
         ))
 
+    # ── Tier 4: BC Rejection History ───────────────────────────────────────────────────────────
+    if state.get("dt_failure_rejected"):
+        sections.append(describe_dt_failure_rejection())
+    elif state.get("error"):
+        sections.append(describe_error_rejection(state["error"]))
+
     return sections
 
 
@@ -120,13 +130,9 @@ def build_decision_prompt(state) -> str:
 
     if state.get("plan"):
         sections.append(
-            "Plan for this task:\n"
-            "A plan was generated to guide the deformation toward the target.\n"
+            "A high plan and guidance was generated to guide the deformation toward the target.\n"
             "Follow it, but adapt if the beam is not responding as expected.\n\n"
             + state["plan"]
         )
-
-    if state.get("error"):
-        sections.append(describe_error_rejection(state["error"]))
 
     return "\n\n".join(s for s in sections if s)

@@ -68,6 +68,7 @@ class ControllerState(TypedDict):
     # ============ ITERATION TRACKING
     iteration:     int   # canonical iteration counter; incremented by programmer_node each cycle
     iteration_log: list  # list of {iteration, decision, tip_pos} — one per completed iteration
+    attempt_count: int   # incremented by decision_node every cycle, including rejected BCs
 
     # ============ EVALUATOR
     # Geometric shape error computed by evaluator_node after each programmer run.
@@ -91,6 +92,7 @@ class ControllerState(TypedDict):
 
     # ============ GLOBAL
     error: str | None
+    dt_failure_rejected: bool  # True when the last BC was rejected for exhausting the dt retry ladder
 
 
 def initial_controller_state(
@@ -122,9 +124,11 @@ def initial_controller_state(
         "result": "",
         "iteration":         0,
         "iteration_log":     [],
+        "attempt_count":     0,
         "eval_result":       {},
         "reaction_force":    None,
         "contact_x":         None,
         "contact_y":         None,
         "error":             None,
+        "dt_failure_rejected": False,
     }

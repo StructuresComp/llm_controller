@@ -16,8 +16,12 @@ class SShape(BenchmarkCase):
     loss_type          = "curvature"
     reference_kappa_fn = staticmethod(kappa_s)
     target_description = (
-        "Full-sine curvature: positive first half, negative second half, one inflection at 50% arc-length. "
-        "End corrections make the two halves slightly asymmetric. "
+        "Bend the DLO into an S-shape. Target curvature values along the arc-length "
+        "are provided below. "
+        "Overall, it is a full-sine curvature profile: positive first half, negative "
+        "second half, exactly antisymmetric about the midpoint with one inflection at "
+        "50% arc-length. End corrections add nonzero curvature at both tips while "
+        "preserving that antisymmetry. "
         "Invariant to translation and rotation — a rotated or shifted S still scores 0%."
     )
     success_threshold  = 0.05
