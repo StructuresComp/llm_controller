@@ -7,7 +7,9 @@
 #                 and iteration counter; no-op in myopic mode.
 #                 "plan":   runs only at iteration 0.
 #                 "replan": runs every REPLAN_FREQ iterations (overwrites plan).
-# decision_node — always runs; calls LLM once with _BC_SCHEMA for BC decision;
+# decision_node — always runs; calls LLM with _BC_SCHEMA for BC decision (retrying up
+#                 to TOOL_CALL_ATTEMPTS times, then an extraction-fallback pass via a
+#                 separate reliable model if every attempt fails to parse);
 #                 convergence is determined deterministically from eval_result.
 #
 # INPUT/OUTPUT MANIFEST:
@@ -24,8 +26,9 @@
 #           state["converged"] bool
 #           state["orchestrator_prompt"] str (for JSONL traceability)
 #           state["error"] None on success; set (and "decision" omitted) if the LLM
-#             tool call still fails to parse after config.TOOL_CALL_ATTEMPTS retries —
-#             workflow.py routes that straight to END.
+#             tool call still fails to parse after config.TOOL_CALL_ATTEMPTS retries
+#             AND the extraction fallback (config.EXTRACTION_PROVIDER/EXTRACTION_MODEL)
+#             also fails — workflow.py routes that straight to END.
 # ---------------------------------------------------------------------------
 #
 # Section order:
@@ -212,6 +215,20 @@ _DECISION_SYSTEM = (
     "You must call the set_boundary_condition tool exactly once."
 )
 
+_EXTRACTION_SYSTEM = (
+    "You extract structured data faithfully. You never invent, adjust, or infer "
+    "values that were not explicitly stated in the text you are given."
+)
+
+_EXTRACTION_PROMPT_TEMPLATE = (
+    "A controller was asked to decide the next boundary condition for a deformable "
+    "linear object and responded with the text below. Extract exactly the x0, y0, "
+    "theta, and reason it stated by calling set_boundary_condition — do not invent, "
+    "adjust, or infer values it did not explicitly give. If it gave no usable values "
+    "at all, do your best to infer the closest reasonable call from context.\n\n"
+    "Controller response:\n{free_text}"
+)
+
 
 # ---------------------------------------------------------------------------
 # 4. HELPERS
@@ -228,6 +245,35 @@ def _detect_stagnation(bc_history: list, tol: float = 1e-4) -> bool:
         if diff > tol:
             return False
     return True
+
+
+def _try_extraction_fallback(prompt: str) -> dict | None:
+    """
+    Last resort after config.TOOL_CALL_ATTEMPTS is exhausted: get a free-text response
+    from the configured model (no schema constraint — an easier task than forcing valid
+    JSON), then use config.EXTRACTION_PROVIDER/EXTRACTION_MODEL (a model known to be
+    reliable at forced tool-calling) purely to extract the decision from that text.
+    The extraction model never makes its own decision, only transcribes what the
+    configured model already said. Returns None on any failure (treated as terminal
+    by the caller — no separate retry budget for extraction).
+    """
+    try:
+        free_text = call_llm(prompt=prompt, system=_DECISION_SYSTEM)
+        decision = call_llm_with_tool(
+            prompt      = _EXTRACTION_PROMPT_TEMPLATE.format(free_text=free_text),
+            tool_schema = _BC_SCHEMA,
+            tool_name   = "set_boundary_condition",
+            system      = _EXTRACTION_SYSTEM,
+            provider    = config.EXTRACTION_PROVIDER,
+            model       = config.EXTRACTION_MODEL,
+        )
+        for key in ("x0", "y0", "theta"):
+            decision[key] = float(decision[key])
+        return decision
+    except Exception as e:
+        if config.DEBUG:
+            print(f"  [decision] Extraction fallback failed: {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +312,12 @@ def decision_node(state: ControllerState) -> dict:
 
     Retries the LLM tool call up to config.TOOL_CALL_ATTEMPTS additional times if the
     response fails to parse (malformed JSON/tool call — see llm_wrapper's Ollama JSON-
-    prompt fallback). Each attempt counts toward attempt_count. If every attempt fails,
-    returns {"error": ...} instead of raising; workflow.py routes this straight to END.
+    prompt fallback). Each attempt counts toward attempt_count.
+
+    If every attempt fails, falls back to _try_extraction_fallback: a free-text
+    response from the configured model, then a separate extraction-only pass via
+    config.EXTRACTION_PROVIDER/EXTRACTION_MODEL. If that also fails, returns
+    {"error": ...} instead of raising; workflow.py routes this straight to END.
     """
     prompt = build_decision_prompt(state)
 
@@ -310,10 +360,21 @@ def decision_node(state: ControllerState) -> dict:
                     print(f"  [decision] Tool call failed (attempt {attempt + 1}/{max_attempts}): {e} -- giving up.")
 
     if decision is None:
-        return {
-            "error": f"Orchestrator: LLM tool call failed after {max_attempts} attempt(s): {last_error}",
-            "attempt_count": attempt_count,
-        }
+        if config.DEBUG:
+            print(f"  [decision] All {max_attempts} tool-call attempt(s) failed -- trying extraction fallback "
+                  f"({config.EXTRACTION_PROVIDER}/{config.EXTRACTION_MODEL}).")
+        attempt_count += 1
+        decision = _try_extraction_fallback(prompt)
+        if decision is None:
+            if config.DEBUG:
+                print("  [decision] Extraction fallback also failed -- giving up.")
+            return {
+                "error": f"Orchestrator: LLM tool call failed after {max_attempts} attempt(s) "
+                         f"plus extraction fallback: {last_error}",
+                "attempt_count": attempt_count,
+            }
+        if config.DEBUG:
+            print("  [decision] Extraction fallback succeeded.")
 
     # Print decision in real-time
     iteration_num = len(state["iteration_log"]) + 1

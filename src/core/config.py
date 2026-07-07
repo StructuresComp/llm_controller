@@ -18,15 +18,15 @@
 # Provider can also be inferred from the model name (claude-* → anthropic,
 # gpt-/o1-/o3-/o4-* → openai, gemini-* → gemini).
 
-LOG_LLM_CALLS = True   # True = log every prompt + response alongside the run JSON
-RUN_NAME      = ""     # stem for output files: <RUN_NAME>.json + <RUN_NAME>.log
-                       # "" = auto-generate run_<timestamp>_<pid> for each file
-DEBUG         = False  # True = print LLM prompts and responses to terminal
+LOG_LLM_CALLS = True    # True = log every prompt + response alongside the run JSON
+RUN_NAME      = ""      # stem for output files: <RUN_NAME>.json + <RUN_NAME>.log
+                        # "" = auto-generate run_<timestamp>_<pid> for each file
+DEBUG         = True    # True = print LLM prompts and responses to terminal
 
-ollama = True  # if True, use ollama models
+ollama = False          # if True, use ollama models
 if ollama:
     LLM_PROVIDER = "ollama"
-    MODEL        = "olmo2:13b" # "qwen2.5-coder:14b"
+    MODEL        = "qwen2.5-coder:14b"
     # Ollama models available now (as of 07/05/2026). Local/smaller models are
     # less reliable at tool-calling than frontier models (Claude, GPT, Gemini) --
     # TOOL_CALL_ATTEMPTS below exists to retry past occasional malformed tool-call
@@ -35,26 +35,40 @@ if ollama:
     # "qwen2.5-coder:14b"  -- unreliable tool-calling
     # "phi4"               -- no native tool-calling support; falls back to JSON-prompt emulation
     # "mistral-nemo"       -- reliable tool-calling
-    # "gemma3:12b"         -- reliable tool-calling # Conservative
-    # "olmo2:13b"          -- reliable tool-calling # Aggressive
+    # "gemma3:12b"         -- reliable tool-calling
+    # "olmo2:13b"          -- reliable tool-calling
 
     # Ollama-specific settings (ignored when provider is not "ollama")
-    OLLAMA_BASE_URL    = "https://passenger-dod-cafe-placed.trycloudflare.com"
+    OLLAMA_BASE_URL    = "https://postcard-enhancement-cigarettes-ware.trycloudflare.com"
     OLLAMA_TIMEOUT     = 300   # seconds
     OLLAMA_TEMPERATURE = 0.0
 else:
     LLM_PROVIDER = "anthropic"
     MODEL        = "claude-haiku-4-5"
-    MODEL        = "claude-opus-4-8" # "claude-sonnet-4-6"
+    # MODEL        = "claude-opus-4-8" # "claude-sonnet-4-6"
 
-    LLM_PROVIDER = "gemini"
-    MODEL        = "gemini-3.5-flash"
+    # LLM_PROVIDER = "gemini"
+    # MODEL        = "gemini-3.5-flash"
     # LLM_PROVIDER = "openai"
     # MODEL        = "gpt-5.5"
 
-MAX_TOKENS   = 20000 # Maximum allowed tokens per LLM call
-TOOL_CALL_ATTEMPTS = 5   # 0 (or <1) = quit immediately if a tool-call LLM response fails to parse
+MAX_TOKENS   = 8000      # Maximum allowed tokens per LLM call
+                         # Anthropic-specific ceiling: the SDK requires stream=True (which we
+                         # don't use) above ~21000, since it estimates that generation could
+                         # take longer than its 10-minute non-streaming timeout. Ollama has no
+                         # such limit -- don't raise this past ~21000 without adding streaming
+                         # support in llm_wrapper's AnthropicProvider first.
+TOOL_CALL_ATTEMPTS = 1   # 0 (or <1) = quit immediately if a tool-call LLM response fails to parse
                          # >=1 = retry that many additional times before quitting
+                         # Mainly needed for local Ollama models (some occasionally fail to
+                         # produce a valid tool call); frontier models rarely need retries.
+
+# Used only when TOOL_CALL_ATTEMPTS is exhausted: get a free-text response from the
+# configured model (no schema constraint), then use a separate, reliable model here
+# purely to extract the structured decision from that text. Never makes its own
+# decision -- extraction only. Requires this provider's API key to be set.
+EXTRACTION_PROVIDER = "anthropic"
+EXTRACTION_MODEL    = "claude-haiku-4-5"
                          # Mainly needed for local Ollama models (some occasionally fail to
                          # produce a valid tool call); frontier models rarely need retries.
 
@@ -78,16 +92,16 @@ SHOW_ERROR_PERCENT     = True    # True = show error % in prompts; False = hide 
 # ---------------------------------------------------------------------------
 # 2b. Orchestrator perception & history
 # ---------------------------------------------------------------------------
-N_PARTIAL  = 15  # nodes sent to orchestrator (subsampled from full NV under "Physical parameters")
-K_HISTORY  = 5   # number of (shape, BC) pairs kept in rolling history; set to 0 or negative to disable
+N_PARTIAL  = 7   # nodes sent to orchestrator (subsampled from full NV under "Physical parameters")
+K_HISTORY  = 0   # number of (shape, BC) pairs kept in rolling history; set to 0 or negative to disable
 
 # ---------------------------------------------------------------------------
 # 2d. Control loop
 # ---------------------------------------------------------------------------
-ORCHESTRATOR_MODE    = "myopic" # "plan" (grounded), "myopic" (reactive), or "replan" (fresh plan every iteration)
+ORCHESTRATOR_MODE    = "replan" # "plan" (grounded), "myopic" (reactive), or "replan" (fresh plan every iteration)
 REPLAN_FREQ          = 5        # replan every Nth iteration in "replan" mode (1 = every iteration)
 MAX_ITERATIONS       = 100      # hard stop on orchestrator → programmer cycles
-MAX_ITERATIONS_WITH_REJECTIONS = MAX_ITERATIONS * 2  # hard stop on ALL orchestrator decisions, including rejected BCs
+MAX_ITERATIONS_WITH_REJECTIONS = MAX_ITERATIONS * 5  # hard stop on ALL orchestrator decisions, including rejected BCs
 
 # ===========================================================================
 # 3. SIMULATION & VISUALIZATION
@@ -144,7 +158,7 @@ QUIT_ON_DT_FAILURE = False # True = end the run if dt bottoms out without conver
 # ---------------------------------------------------------------------------
 # 3d. Visualization
 # ---------------------------------------------------------------------------
-PLOT_IMAGE = 0  # 0 = no plots; N >= 1 = plot every Nth physics step
+PLOT_IMAGE = 100  # 0 = no plots; N >= 1 = plot every Nth physics step
 
 # ---------------------------------------------------------------------------
 # 3d. Data storage

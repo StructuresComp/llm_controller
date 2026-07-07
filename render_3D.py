@@ -7,7 +7,7 @@ index.html + data.js into viz/ (VISUALIZATION_DIR) ready to open in Chrome.
 
 Usage:
     python3 render_3D.py                      # latest run in logs/
-    python3 render_3D.py logs/run_123.json    # specific run
+    python3 render_3D.py logs/run_123.jsonl   # specific run
 """
 
 import importlib.resources

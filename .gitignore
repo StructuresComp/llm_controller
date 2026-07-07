@@ -6,3 +6,5 @@ logs/
 .claude/
 viz/
 data/
+*.csv
+*.txt

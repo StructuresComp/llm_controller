@@ -1,8 +1,10 @@
 # ---------------------------------------------------------------------------
 # src/llm/llm.py
 # ---------------------------------------------------------------------------
-# Thin adapter over llm_wrapper. Reads provider/model from config.py and
-# delegates all provider calls to llm_wrapper.
+# Thin adapter over llm_wrapper. Defaults to provider/model from config.py,
+# delegates all provider calls to llm_wrapper. Both functions accept optional
+# provider/model overrides (e.g. for decision_node's extraction fallback, which
+# calls config.EXTRACTION_PROVIDER/EXTRACTION_MODEL instead of the primary one).
 #
 # When config.LOG_LLM_CALLS is True, every prompt and response is appended
 # to logs/<RUN_NAME>.log (or logs/run_<timestamp>_<pid>.log if RUN_NAME is
@@ -49,13 +51,17 @@ def call_llm(
     prompt: str,
     system: str = "",
     max_tokens: int = None,
+    provider: str = None,
+    model: str = None,
 ) -> str:
+    """provider/model override config.LLM_PROVIDER/config.MODEL when given —
+    used by decision_node's extraction fallback to call a different model."""
     _init()
     _log("PROMPT", f"system: {system}\n---\n{prompt}")
     response = _call_llm(
         prompt=prompt,
-        model=config.MODEL,
-        provider=config.LLM_PROVIDER,
+        model=model or config.MODEL,
+        provider=provider or config.LLM_PROVIDER,
         max_tokens=max_tokens or config.MAX_TOKENS,
         system=system,
     )
@@ -69,15 +75,19 @@ def call_llm_with_tool(
     tool_name: str,
     system: str = "",
     max_tokens: int = None,
+    provider: str = None,
+    model: str = None,
 ) -> dict:
+    """provider/model override config.LLM_PROVIDER/config.MODEL when given —
+    used by decision_node's extraction fallback to call a different model."""
     _init()
     _log("PROMPT (tool)", f"tool: {tool_name}\nsystem: {system}\n---\n{prompt}")
     response = _call_llm_with_tool(
         prompt=prompt,
         tool_schema=tool_schema,
         tool_name=tool_name,
-        model=config.MODEL,
-        provider=config.LLM_PROVIDER,
+        model=model or config.MODEL,
+        provider=provider or config.LLM_PROVIDER,
         max_tokens=max_tokens or config.MAX_TOKENS,
         system=system,
     )

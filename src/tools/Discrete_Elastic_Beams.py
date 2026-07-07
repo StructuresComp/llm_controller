@@ -531,14 +531,15 @@ def _build_fixed_index(
 # VISUALIZATION
 # ---------------------------------------------------------------------------
 
-def _plot_beam_state(q_new: np.ndarray, ctime: float, walls: list, rod_length: float) -> None:
+def _plot_beam_state(q_new: np.ndarray, ctime: float, walls: list, rod_length: float, iteration: int = None) -> None:
   """Render current beam configuration to matplotlib figure."""
   plt.figure(1)
   plt.clf()
   ax = plt.gca()
   ax.plot(q_new[::2], q_new[1::2], 'ko-')
   plot_walls_2d(ax, walls)
-  ax.set_title(f't={ctime:.4f}s')
+  title = f't={ctime:.4f}s' if iteration is None else f'iter={iteration}  t={ctime:.4f}s'
+  ax.set_title(title)
   ax.set_xlabel('x')
   ax.set_ylabel('y')
   margin = rod_length * 0.4
@@ -722,7 +723,8 @@ def discreteBeam(
   dt: float = 0.01,
   totalTime: float = None,
   plotImage: int = 0,
-  save_stride: int = 1) -> dict:
+  save_stride: int = 1,
+  iteration: int = None) -> dict:
 
   """
   Discrete elastic beam simulator.
@@ -771,6 +773,10 @@ def discreteBeam(
   save_stride : int
       Save every Kth physics step to q_history (default 1 = every step).
       The final step is always included regardless of stride.
+
+  iteration : int, optional
+      Orchestrator control-loop iteration number, shown in the live plot title
+      alongside simulation time (purely cosmetic; has no effect on the physics).
 
   Returns
   -------
@@ -928,7 +934,7 @@ def discreteBeam(
     # Plot — fire on stride OR on the final step so at least one frame always renders.
     if plotImage > 0 and (timeStep % plotImage == 0 or timeStep == Nsteps):
       first_frame = not plt.fignum_exists(1)
-      _plot_beam_state(q_new, ctime, walls, rod_length)
+      _plot_beam_state(q_new, ctime, walls, rod_length, iteration=iteration)
       if first_frame:
         plt.show(block=False)   # register window with event loop; non-blocking on exit
 

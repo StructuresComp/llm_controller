@@ -266,11 +266,29 @@ def main():
     print("\n" + "="*70)
     print("CONTROL LOOP SUMMARY")
     print("="*70)
-    solved     = result.get("eval_result", {}).get("solved", False)
-    final_err  = result.get("eval_result", {}).get("error_percent", None)
+    solved        = result.get("eval_result", {}).get("solved", False)
+    final_err     = result.get("eval_result", {}).get("error_percent", None)
+    iterations_done = len(result["iteration_log"])
+    attempts_used = result.get("attempt_count", 0)
     print(f"\nTarget     : {result['target_shape'] or '(none)'}")
     print(f"Solved     : {solved}" + (f"  (error={final_err:.2f}%)" if final_err is not None else ""))
-    print(f"Iterations : {len(result['iteration_log'])} / {config.MAX_ITERATIONS}")
+    print(f"Iterations : {iterations_done} / {config.MAX_ITERATIONS}")
+    print(f"Attempts   : {attempts_used} / {config.MAX_ITERATIONS_WITH_REJECTIONS}  "
+          f"(includes retried/rejected/extraction-fallback decisions, not just completed iterations)")
+
+    # If we stopped short of MAX_ITERATIONS without solving or hitting a fatal error,
+    # the only remaining termination path is _after_safety's attempt-cap check in
+    # workflow.py -- surface that clearly instead of leaving it to be inferred.
+    if not solved and not result.get("error") and iterations_done < config.MAX_ITERATIONS \
+            and attempts_used >= config.MAX_ITERATIONS_WITH_REJECTIONS:
+        print(
+            f"\n[TERMINATED] Hit MAX_ITERATIONS_WITH_REJECTIONS: {attempts_used} total LLM "
+            f"attempts (successful + retried + rejected) reached the cap of "
+            f"{config.MAX_ITERATIONS_WITH_REJECTIONS} after only "
+            f"{iterations_done}/{config.MAX_ITERATIONS} real iterations completed. "
+            f"Raise MAX_ITERATIONS_WITH_REJECTIONS in config.py to allow more retry/rejection "
+            f"overhead per run."
+        )
 
     if result["iteration_log"]:
         print("\nIteration log:")
@@ -289,6 +307,9 @@ def main():
         print(f"\n[ERROR] {result['error']}")
 
     print("="*70)
+
+    if result.get("error"):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

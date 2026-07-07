@@ -47,6 +47,7 @@ def append_and_trim(history: list, item, max_len: int) -> list:
 def programmer_node(state: ControllerState) -> dict:
     decision = state["decision"]          # {x0, y0, theta} — schema-validated
     ps       = state["physical_system"]
+    iteration_num = state["iteration"] + 1  # computed early: also used for the live plot title
 
     # --- Run simulation (retry with smaller dt if convergence fails) ---
     dt = config.DT
@@ -61,6 +62,7 @@ def programmer_node(state: ControllerState) -> dict:
             dt               = dt,
             plotImage        = config.PLOT_IMAGE,
             save_stride      = config.SAVE_STRIDE,
+            iteration        = iteration_num,
         )
         if result["status"] != "failed_convergence":
             break
@@ -99,7 +101,6 @@ def programmer_node(state: ControllerState) -> dict:
     bc_history    = append_and_trim(state["bc_history"],     bc_current, _keep)
 
     # --- Log this iteration ---
-    iteration_num = state["iteration"] + 1
     iteration_entry = {
         "iteration": iteration_num,
         "decision":  decision,

@@ -15,6 +15,12 @@
 # The full command list is always written to experiments/commands.txt (one
 # command per line) before running, as a record of exactly what was launched.
 #
+# Each run's full stdout/stderr is captured (not streamed to the terminal) and
+# saved to experiments/sweep_logs/<stem>.log. The terminal only gets one
+# concise status line per run, so an N-model sweep failing (e.g. Ollama server
+# down) doesn't dump N full tracebacks/banners — check the per-run log file
+# for full detail on any individual failure.
+#
 # The resulting command list is executed with a multiprocessing Pool so N
 # runs go in parallel — N is a CLI flag, not hardcoded.
 #
@@ -39,7 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.core.paths import PROJECT_ROOT, VISUALIZATION_DIR
 
-COMMANDS_FILE = Path(__file__).resolve().parent / "commands.txt"
+COMMANDS_FILE  = Path(__file__).resolve().parent / "commands.txt"
+SWEEP_LOGS_DIR = Path(__file__).resolve().parent / "sweep_logs"
 
 # ---------------------------------------------------------------------------
 # SWEEP CONFIGURATION — edit these to change what gets run.
@@ -55,15 +62,15 @@ MODELS = [
 ]
 
 TARGETS = [
-    "C",
+    # "C",
     "U",
     "S",
-    "L",
-    "arc",
-    "sine",
+    # "L",
+    # "arc",
+    # "sine",
 ]
 
-REPETITIONS = 2  # repeats per (model, target) pair — bump for stochastic-behavior statistics
+REPETITIONS = 1  # repeats per (model, target) pair — bump for stochastic-behavior statistics
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +82,8 @@ def _sanitize(name: str) -> str:
     return name.replace(":", "-").replace("/", "-")
 
 
-def build_commands() -> list[str]:
-    """One chained shell command per (model, target, repetition): run cli.py, then plot on success."""
+def build_commands() -> list[tuple[str, str]]:
+    """One (stem, chained shell command) pair per (model, target, repetition)."""
     python_exe = shlex.quote(sys.executable)
     viz_dir = shlex.quote(str(VISUALIZATION_DIR))
 
@@ -93,13 +100,13 @@ def build_commands() -> list[str]:
                     f"{python_exe} analysis_plots.py --run {shlex.quote(stem)} "
                     f"--error-curve --output-dir {viz_dir}"
                 )
-                commands.append(f"{run_cmd} && {plot_cmd}")
+                commands.append((stem, f"{run_cmd} && {plot_cmd}"))
     return commands
 
 
-def save_commands(commands: list[str]) -> None:
+def save_commands(commands: list[tuple[str, str]]) -> None:
     """Write the full command list to commands.txt as a record of what was launched."""
-    COMMANDS_FILE.write_text("\n".join(commands) + "\n")
+    COMMANDS_FILE.write_text("\n".join(cmd for _, cmd in commands) + "\n")
     print(f"Saved {len(commands)} commands to {COMMANDS_FILE}")
 
 
@@ -107,14 +114,36 @@ def save_commands(commands: list[str]) -> None:
 # EXECUTION
 # ---------------------------------------------------------------------------
 
-def run_one(cmdline: str) -> int:
-    """Execute one chained command; return its exit code."""
-    print(f"[START] {cmdline}")
-    proc = subprocess.Popen(cmdline, shell=True, cwd=PROJECT_ROOT)
-    proc.communicate()
-    status = "OK" if proc.returncode == 0 else f"FAILED (exit {proc.returncode})"
-    print(f"[{status}] {cmdline}")
-    return proc.returncode
+def _last_meaningful_line(output: str) -> str:
+    """Pick a short, human-relevant line out of a failed run's captured output."""
+    lines = [l for l in output.splitlines() if l.strip()]
+    for line in lines:
+        if line.startswith("[ERROR]"):
+            return line
+    return lines[-1] if lines else "(no output captured)"
+
+
+def run_one(item: tuple[str, str]) -> int:
+    """Execute one chained command; capture its output to a log file instead of
+    streaming to the terminal, and print one concise status line. Returns exit code."""
+    stem, cmdline = item
+    SWEEP_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = SWEEP_LOGS_DIR / f"{stem}.log"
+
+    print(f"[START] {stem}")
+    result = subprocess.run(
+        cmdline, shell=True, cwd=PROJECT_ROOT,
+        capture_output=True, text=True,
+    )
+    output = result.stdout + result.stderr
+    log_path.write_text(output)
+
+    if result.returncode == 0:
+        print(f"[OK] {stem}")
+    else:
+        print(f"[FAILED exit={result.returncode}] {stem}: {_last_meaningful_line(output)}")
+        print(f"         full output: {log_path}")
+    return result.returncode
 
 
 def main():
@@ -140,8 +169,8 @@ def main():
 
     if args.dry_run:
         print()
-        for c in commands:
-            print(c)
+        for _, cmdline in commands:
+            print(cmdline)
         return
 
     start = time.time()

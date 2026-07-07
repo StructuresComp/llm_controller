@@ -13,20 +13,26 @@
 #   - "Success" uses one global SUCCESS_THRESHOLD_PERCENT constant below, not
 #     each benchmark's own success_threshold (that would need src.benchmarks).
 #
-# A few small pieces are intentionally duplicated from run_sweep.py (MODELS,
-# TARGETS, _sanitize) rather than imported, since importing run_sweep.py would
-# transitively pull in its `from src.core.paths import ...` line.
+# Runs are discovered by scanning logs/*.jsonl directly -- not via run_sweep.py's
+# commands.txt, which only reflects whatever MODELS/TARGETS its *last* invocation
+# happened to use and gets overwritten every run. logs/ is the actual data.
+#
+# Model and target are inferred per run, not from a hardcoded list: target comes
+# from the jsonl header's own target_shape field (ground truth), and that's used
+# to split the stem "<model>_<target>_run_<NN>" back into its model part -- no
+# duplication of run_sweep.py's MODELS/TARGETS, so nothing here can drift out of
+# sync with it.
 #
 # Usage (run from anywhere):
 #   python3 experiments/analyze_sweep.py
-#   python3 experiments/analyze_sweep.py --commands-file experiments/commands.txt
+#   python3 experiments/analyze_sweep.py --logs-dir logs/
 #   python3 experiments/analyze_sweep.py --success-threshold 10.0
 # ---------------------------------------------------------------------------
 
 import argparse
 import csv
 import json
-import shlex
+import re
 from pathlib import Path
 
 import numpy as np
@@ -35,7 +41,6 @@ import matplotlib.pyplot as plt
 EXPERIMENTS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT    = EXPERIMENTS_DIR.parent
 
-DEFAULT_COMMANDS_FILE = EXPERIMENTS_DIR / "commands.txt"
 DEFAULT_LOGS_DIR      = PROJECT_ROOT / "logs"
 DEFAULT_FIGURES_DIR   = EXPERIMENTS_DIR / "figures"
 DEFAULT_METRICS_CSV   = EXPERIMENTS_DIR / "metrics_per_run.csv"
@@ -43,58 +48,36 @@ DEFAULT_METRICS_CSV   = EXPERIMENTS_DIR / "metrics_per_run.csv"
 EPS = 1e-6
 SUCCESS_THRESHOLD_PERCENT = 5.0  # error_percent below this counts as "solved"
 
-# Duplicated from run_sweep.py — keep in sync with that file's MODELS/TARGETS.
-MODELS = [
-    "qwen2.5:14b",
-    "qwen2.5-coder:14b",
-    "phi4",
-    "mistral-nemo",
-    "gemma3:12b",
-    "olmo2:13b",
-]
-
-TARGETS = [
-    "C",
-    "U",
-    "S",
-    "L",
-    "arc",
-    "sine",
-]
-
-
-def _sanitize(name: str) -> str:
-    """Mirrors run_sweep.py's _sanitize — must match how stems were built."""
-    return name.replace(":", "-").replace("/", "-")
+_STEM_SUFFIX_RE = re.compile(r"^(?P<rest>.+)_run_(?P<rep>\d+)$")
 
 
 # ---------------------------------------------------------------------------
 # 1. DISCOVERING RUNS
 # ---------------------------------------------------------------------------
 
-def stems_from_commands_file(path: Path) -> list[str]:
-    """Extract every --run-name value from a run_sweep.py commands.txt file."""
-    stems = []
-    for line in path.read_text().splitlines():
-        if not line.strip():
-            continue
-        first_cmd = line.split("&&")[0]
-        tokens = shlex.split(first_cmd)
-        if "--run-name" in tokens:
-            stems.append(tokens[tokens.index("--run-name") + 1])
-    return stems
+def discover_stems(logs_dir: Path) -> list[str]:
+    """Every run present in logs_dir, found by directly scanning for <stem>.jsonl files."""
+    return sorted(p.stem for p in logs_dir.glob("*.jsonl"))
 
 
-def match_stem(stem: str) -> tuple[str, str, int] | None:
-    """Recover (model, target, repetition) from a stem built by run_sweep.py."""
-    for model in MODELS:
-        for target in TARGETS:
-            prefix = f"{_sanitize(model)}_{target}_run_"
-            if stem.startswith(prefix):
-                suffix = stem[len(prefix):]
-                if suffix.isdigit():
-                    return model, target, int(suffix)
-    return None
+def parse_stem(stem: str, target: str) -> tuple[str, int] | None:
+    """
+    Recover (model, repetition) from a stem "<model>_<target>_run_<NN>", given
+    the target already read from the run's own jsonl header (ground truth).
+    No hardcoded model/target list needed: the known target is the anchor that
+    lets us split off the model part unambiguously. `model` here is whatever
+    sanitized form run_sweep.py's _sanitize() produced (":" -> "-"), since
+    that's what's actually in the filename.
+    """
+    m = _STEM_SUFFIX_RE.match(stem)
+    if not m:
+        return None
+    rest, rep = m.group("rest"), int(m.group("rep"))
+    suffix = f"_{target}"
+    if not rest.endswith(suffix):
+        return None
+    model = rest[: -len(suffix)]
+    return model, rep
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +87,12 @@ def match_stem(stem: str) -> tuple[str, str, int] | None:
 def load_run(jsonl_path: Path) -> dict:
     """
     Load one run's JSONL file. Returns:
-      {"rod_length": float, "iterations": [{"iteration", "bc", "error_percent"}, ...]}
+      {"rod_length": float, "target_shape": str, "iterations": [{"iteration", "bc", "error_percent"}, ...]}
     Multiple snapshots can share one iteration (SAVE_STRIDE > 1) — only the
     last snapshot per iteration is kept, matching what the run actually scored.
     """
     rod_length = None
+    target_shape = None
     by_iteration: dict[int, dict] = {}
 
     with open(jsonl_path) as f:
@@ -119,11 +103,12 @@ def load_run(jsonl_path: Path) -> dict:
             record = json.loads(line)
             if record.get("type") == "header":
                 rod_length = record["physical_system"]["rod_length"]
+                target_shape = record.get("target_shape")
                 continue
             by_iteration[record["iteration"]] = record  # last write wins
 
     iterations = [by_iteration[i] for i in sorted(by_iteration)]
-    return {"rod_length": rod_length, "iterations": iterations}
+    return {"rod_length": rod_length, "target_shape": target_shape, "iterations": iterations}
 
 
 # ---------------------------------------------------------------------------
@@ -367,10 +352,8 @@ def make_figures(rows: list[dict], runs: dict[str, dict], figures_dir: Path) -> 
 def main():
     global SUCCESS_THRESHOLD_PERCENT
     parser = argparse.ArgumentParser(description="Analyze a run_sweep.py sweep from its JSONL logs.")
-    parser.add_argument("--commands-file", type=Path, default=DEFAULT_COMMANDS_FILE,
-                         help="commands.txt produced by run_sweep.py (default: experiments/commands.txt).")
     parser.add_argument("--logs-dir", type=Path, default=DEFAULT_LOGS_DIR,
-                         help="Directory containing <stem>.jsonl files (default: logs/).")
+                         help="Directory to scan for <stem>.jsonl files (default: logs/).")
     parser.add_argument("--figures-dir", type=Path, default=DEFAULT_FIGURES_DIR,
                          help="Where to save figures (default: experiments/figures/).")
     parser.add_argument("--out", type=Path, default=DEFAULT_METRICS_CSV,
@@ -380,21 +363,26 @@ def main():
     args = parser.parse_args()
     SUCCESS_THRESHOLD_PERCENT = args.success_threshold
 
-    stems = stems_from_commands_file(args.commands_file)
-    print(f"Found {len(stems)} stems in {args.commands_file}")
+    stems = discover_stems(args.logs_dir)
+    print(f"Found {len(stems)} run(s) in {args.logs_dir}")
 
     rows = []
     runs = {}
     skipped = []
     for stem in stems:
         jsonl_path = args.logs_dir / f"{stem}.jsonl"
-        parsed = match_stem(stem)
-        if parsed is None or not jsonl_path.exists():
+        if not jsonl_path.exists():
             skipped.append(stem)
             continue
 
-        model, target, repetition = parsed
         run = load_run(jsonl_path)
+        target = run.get("target_shape")
+        parsed = parse_stem(stem, target) if target else None
+        if parsed is None:
+            skipped.append(stem)
+            continue
+
+        model, repetition = parsed
         metrics = compute_metrics(run)
         runs[stem] = run
         rows.append({"stem": stem, "model": model, "target": target, "repetition": repetition, **metrics})
