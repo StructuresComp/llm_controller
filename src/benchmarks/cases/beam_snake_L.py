@@ -1,48 +1,39 @@
 """
 Snake-L benchmark: navigate the beam tip through an L-shaped tube and reach
-the target point (0.05, -0.11) m inside the horizontal exit channel.
+the target point inside the horizontal exit channel.
 
 Run standalone:
     python -m src.benchmarks.cases.beam_snake_L
 """
 
 from src.benchmarks import BenchmarkCase, register
-from src.benchmarks.loss_beam.profile_tip_reach import tip_reach_loss
 
-
-TARGET_X = 0.05
-TARGET_Y = -0.11
+_TARGET = (0.05, -0.11)
 
 
 class SnakeLCase(BenchmarkCase):
-    name          = "snake_L"
-    physics_type  = "beam"
+    name             = "snake_L"
+    physics_type     = "beam"
+    loss_type        = "tip"
+    reference_tip_fn = _TARGET
     success_threshold = 0.05
 
     # L-shaped tube: vertical entry channel x ∈ [-0.01, +0.01] (top open),
     # turning into a horizontal exit channel y ∈ [-0.12, -0.10] going right to x = +0.12.
     walls = [
-        {"P0": [-0.01,  0.02], "P1": [-0.01, -0.12]},   # left wall of vertical channel
-        {"P0": [-0.01, -0.12], "P1": [ 0.12, -0.12]},   # floor
-        {"P0": [ 0.12, -0.12], "P1": [ 0.12, -0.10]},   # right end cap
-        {"P0": [ 0.12, -0.10], "P1": [ 0.01, -0.10]},   # ceiling of horizontal channel
-        {"P0": [ 0.01, -0.10], "P1": [ 0.01,  0.02]},   # right wall of vertical channel
+        {"P0": [-0.02,  -0.02], "P1": [-0.02, -0.12]},   # left wall of vertical channel
+        {"P0": [-0.02,  -0.12], "P1": [ 0.12, -0.12]},   # floor
+        {"P0": [ 0.12,  -0.08], "P1": [ 0.02, -0.08]},   # ceiling of horizontal channel
+        {"P0": [ 0.02,  -0.08], "P1": [ 0.02, -0.02]},   # right wall of vertical channel
     ]
 
     target_description = (
         f"Navigate the free tip through an L-shaped tube and reach "
-        f"({TARGET_X:.2f}, {TARGET_Y:.2f}) m inside the horizontal exit channel.\n"
-        f"Strategy: drive node 0 straight down (θ ≈ 0) to push the tip through "
-        f"the vertical slot, then rotate θ positive once the tip clears the corner "
-        f"at y ≈ -0.10 m to bend it rightward along the horizontal channel."
+        f"({_TARGET[0]:.2f}, {_TARGET[1]:.2f}) m inside the horizontal exit channel.\n"
+        f"Strategy: drive node 0 straight down (theta ~ -pi/2) to push the tip through "
+        f"the vertical slot, then rotate theta toward 0 once the tip clears the corner "
+        f"at y ~ -0.10 m to bend it rightward along the horizontal channel."
     )
-
-    def reference_fn(self, x0=0.0, y0=0.0, theta=0.0):
-        return None   # tip-reach case — no reference shape
-
-    def loss_fn(self, nodes: list, ps=None, q_ref=None) -> dict:
-        rod_length = ps.rod_length if ps is not None else 0.1
-        return tip_reach_loss(nodes, TARGET_X, TARGET_Y, rod_length)
 
 
 register(SnakeLCase())
@@ -50,19 +41,21 @@ register(SnakeLCase())
 
 # ---------------------------------------------------------------------------
 # STANDALONE TEST
-# Set TEST_CONFIG to (x, y) node positions to evaluate a real configuration.
 # ---------------------------------------------------------------------------
 
-TEST_CONFIG = None
-
-
 def main():
-    case   = SnakeLCase()
-    nodes  = [(0.0, 0.0)] * 4 + [(TARGET_X, TARGET_Y)] if TEST_CONFIG is None else TEST_CONFIG
-    result = case.loss_fn(nodes)
-    label  = "sanity check (tip at target)" if TEST_CONFIG is None else "test config"
-    print(f"snake_L  [{label}]")
-    print(f"  error: {result['error_percent']:.2f}%  |  {result['diagnostics']}")
+    from types import SimpleNamespace
+    import numpy as np
+    from src.core import config
+    case    = SnakeLCase()
+    tx, ty  = case.reference_tip_fn
+    nv      = 5
+    rod_len = config.ROD_LENGTH
+    ps      = SimpleNamespace(nv=nv, deltaL=rod_len / (nv - 1), rod_length=rod_len)
+    q       = np.zeros(2 * nv)
+    q[-2], q[-1] = tx, ty
+    result  = case.loss_fn(q, ps)
+    print(f"snake_L  tip-at-target  error: {result['error_percent']:.2f}%")
 
 
 if __name__ == "__main__":

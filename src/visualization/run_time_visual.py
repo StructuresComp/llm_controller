@@ -41,7 +41,6 @@ def plot_shape(
         _draw_walls(ax, walls)
 
     ax.set_aspect("equal")
-    ax.invert_yaxis()
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
     ax.set_title(f"{name}   {error_percent:.1f}% error" if name else f"{error_percent:.1f}% error")
@@ -64,8 +63,7 @@ def plot_comparison(
     """
     Overlay reference shape (dashed red) and actual configuration (solid blue).
 
-    result is the dict returned by loss_fn — needs at least error_percent
-    and diagnostics.
+    result is the dict returned by loss_fn — needs at least error_percent.
     """
     if axes is None:
         _, axes = plt.subplots(figsize=(4, 5))
@@ -84,18 +82,12 @@ def plot_comparison(
         _draw_walls(axes, walls)
 
     err   = result.get("error_percent", float("nan"))
-    diag  = result.get("diagnostics", "")
     title = f"{name}   {err:.1f}% error" if name else f"{err:.1f}% error"
     axes.set_aspect("equal")
-    axes.invert_yaxis()
     axes.set_xlabel("x (m)")
     axes.set_ylabel("y (m)")
     axes.set_title(title)
     axes.legend(fontsize=7)
-
-    if diag:
-        axes.text(0.02, 0.02, diag, transform=axes.transAxes,
-                  fontsize=7, verticalalignment="bottom", color="gray")
 
     if show:
         plt.tight_layout()

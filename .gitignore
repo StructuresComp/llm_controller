@@ -7,3 +7,5 @@ logs/
 viz/
 data/
 experiments/_pilot_overlays/
+*.csv
+*.txt

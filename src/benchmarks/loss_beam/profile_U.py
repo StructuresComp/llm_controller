@@ -1,20 +1,24 @@
 """
-U-shape curvature profile: linear ramp to π = semicircle.
+U-shape curvature profile: cosine bump centered at arc-length midpoint.
 
 Exports:
-    profile_u(s_norm, total_turn)  — ideal turning angle at normalised arc-length s
-    fit_u(s_norm, dtheta)          — estimate total_turn from observed turning angles
+    kappa_u(s_norm, rod_length, width) — curvature density as function of arc-length
 """
 
 import numpy as np
 
 
-def profile_u(s_norm: np.ndarray, total_turn: float = np.pi) -> np.ndarray:
-    """theta*(s) = total_turn * s  — same form as C but total_turn = π."""
-    return total_turn * s_norm
+def kappa_u(s_norm: np.ndarray, rod_length: float = 1.0, width: float = 0.65) -> np.ndarray:
+    """
+    Curvature function for U-shape.
 
+    Cosine bump centered at s=0.5; exactly zero outside the bend region (compact support).
+    Amplitude A = 2*pi/width ensures the total turning angle integrates to pi (180° U-turn).
 
-def fit_u(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
-    """Sign-corrected π: total turn is always ±π; we just read the sign from the data."""
-    sign = float(np.sign(dtheta[-1])) if len(dtheta) > 0 else 1.0
-    return {"total_turn": (sign or 1.0) * np.pi}
+    kappa = 2*tan(theta/2) / dL, normalized by rod_length.
+    """
+    u = (s_norm - 0.5) / (0.5 * width)
+    bump = np.where(np.abs(u) <= 1.0, 0.5 * (1.0 + np.cos(np.pi * u)), 0.0)
+    A = 2.0 * np.pi / width
+    kappa_raw = A * bump
+    return kappa_raw / rod_length

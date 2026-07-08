@@ -19,6 +19,7 @@
 # 1. IMPORTS
 # ---------------------------------------------------------------------------
 from src.benchmarks import get_benchmark
+from src.core import config
 from src.models.state_llm_control import ControllerState
 
 
@@ -38,20 +39,13 @@ from src.models.state_llm_control import ControllerState
 # 4. HELPERS
 # ---------------------------------------------------------------------------
 
-def _latest_observable(state: ControllerState) -> list:
-    """Return the most recent observable configuration, or empty list."""
-    if not state["shape_history"]:
-        return []
-    return state["shape_history"][-1]
-
-
 # ---------------------------------------------------------------------------
 # 5. NODES
 # ---------------------------------------------------------------------------
 
 def evaluator_node(state: ControllerState) -> dict:
     """Look up the active benchmark, compute its loss, and stream snapshots to disk."""
-    nodes  = _latest_observable(state)
+    nodes  = state["shape_history"][-1] if state["shape_history"] else []
     target = state["target_shape"]
 
     if not nodes or not target:
@@ -62,13 +56,13 @@ def evaluator_node(state: ControllerState) -> dict:
     except KeyError:
         return {"eval_result": {}}
 
-    result = benchmark.loss_fn(nodes, state["physical_system"])
+    result = benchmark.loss_fn(state["latest_config"], state["physical_system"])
     result["solved"] = (result.get("error_percent", 100.0) / 100.0) <= benchmark.success_threshold
 
     pct = result["error_percent"]
     thr = benchmark.success_threshold * 100
     if result["solved"]:
-        print(f"[Evaluator] SOLVED  error={pct:.2f}% ≤ threshold={thr:.1f}%")
+        print(f"[Evaluator] SOLVED  error={pct:.2f}% <= threshold={thr:.1f}%")
     else:
         print(f"[Evaluator] error={pct:.2f}%  (threshold={thr:.1f}%)")
 
@@ -106,8 +100,10 @@ def evaluator_node(state: ControllerState) -> dict:
                     snapshot_data["convergence_reason"] = reason
             config_writer.append_snapshot(**snapshot_data)
 
+    error_history = (state.get("error_history", []) + [pct])[-(config.K_HISTORY + 1):]
+
     # Reset the safety-rejection counter for the next iteration.
-    return {"eval_result": result, "safety_rejections": 0}
+    return {"eval_result": result, "error_history": error_history, "safety_rejections": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -116,20 +112,31 @@ def evaluator_node(state: ControllerState) -> dict:
 
 def main():
     """Standalone test: evaluate the ideal C-shape reference (expect ~0% error)."""
-    from src.benchmarks import get_benchmark
+    from src.models.physical_system import make_physical_system
 
+    ps        = make_physical_system(config)
     benchmark = get_benchmark("C")
-    nodes     = benchmark.reference_fn()
+    ref       = benchmark.reference_fn(ps=ps)          # ndarray (nv, 2)
+    q         = ref.flatten().tolist()
+    obs_nodes = [[float(ref[i, 0]), float(ref[i, 1])] for i in ps.observable_nodes]
 
     state = {
-        "shape_history":   [nodes],
+        "shape_history":   [obs_nodes],
+        "latest_config":   q,
         "target_shape":    "C",
-        "physical_system": {},
+        "physical_system": ps,
+        "error_history":   [],
+        "q_history":       [],
+        "config_writer":   None,
+        "bc_current":      [0.0, 0.0, 0.0],
+        "ctime_current":   0.0,
+        "iteration_log":   [],
+        "orchestrator_prompt": None,
     }
 
     result = evaluator_node(state)
     ev     = result["eval_result"]
-    print(f"Shape: C  |  error: {ev['error_percent']:.2f}%  |  {ev['diagnostics']}")
+    print(f"Shape: C  |  error: {ev['error_percent']:.2f}%  |  solved: {ev['solved']}")
 
 
 # ---------------------------------------------------------------------------

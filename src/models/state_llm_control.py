@@ -2,14 +2,12 @@
 # src/models/state_llm_control.py
 # ---------------------------------------------------------------------------
 # Shared working state for the LLM controller pipeline.
-#
-# Pipeline (current):  orchestrator → programmer
-# Pipeline (future):   orchestrator → programmer → (converged?) → loop back
 # ---------------------------------------------------------------------------
 
 from typing import Annotated
 from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
+import numpy as np
 
 
 class ControllerState(TypedDict):
@@ -34,8 +32,10 @@ class ControllerState(TypedDict):
     bc_current: list   # BC at the end of the last run
 
     # ============ HISTORY (rolling window, length = K_HISTORY)
-    bc_history:    list   # list of [x0, y0, theta] — last K BCs issued
-    shape_history: list   # list of partial configs (N_PARTIAL nodes each)
+    bc_history:     list   # list of [x0, y0, theta] — last K BCs issued
+    shape_history:  list   # list of partial configs (N_PARTIAL nodes each)
+    kappa_history:  list   # list of observable-node kappa arrays — parallel to shape_history
+    error_history:  list   # list of error_percent floats — parallel to shape_history
 
     # ============ CURRENT SNAPSHOT BUFFER
     # q_history from the last programmer call, awaiting evaluation and disk write.
@@ -45,7 +45,9 @@ class ControllerState(TypedDict):
     # ============ LATEST CONFIGURATION
     # Final DOF vector from last programmer call. Streamed snapshots go to JSONL;
     # state keeps only the latest config for reference and LLM observations.
-    latest_config: list | None
+    latest_config:      list | None
+    kappa_dimensional:  object   # np.ndarray length nv: dimensional curvature (1/m) at each node
+    axial_strain:       object   # np.ndarray length nv-1: axial strain per edge (positive = stretched)
 
     # ============ DISK I/O
     # ConfigWriter instance for streaming trajectory snapshots to disk.
@@ -61,12 +63,14 @@ class ControllerState(TypedDict):
     # ============ ORCHESTRATOR
     # decision is a validated dict produced by call_llm_with_tool — never a raw string.
     # Schema: {"x0": float, "y0": float, "theta": float}
-    decision: dict  # BC decision from orchestrator (structured, schema-enforced)
-    plan:     str   # high-level strategy (plan mode only; "" in myopic mode)
-    result:   str   # programmer's natural-language summary of last run
+    decision:  dict  # BC decision from orchestrator (structured, schema-enforced)
+    plan:   str   # high-level strategy (plan mode only; "" in myopic mode)
+    result: str   # programmer's natural-language summary of last run
 
-    # ============ ITERATION LOG
+    # ============ ITERATION TRACKING
+    iteration:     int   # canonical iteration counter; incremented by programmer_node each cycle
     iteration_log: list  # list of {iteration, decision, tip_pos} — one per completed iteration
+    attempt_count: int   # incremented by decision_node every cycle, including rejected BCs
 
     # ============ EVALUATOR
     # Geometric shape error computed by evaluator_node after each programmer run.
@@ -74,8 +78,23 @@ class ControllerState(TypedDict):
     # Empty dict before first evaluation or when target_shape is unset.
     eval_result: dict
 
+    # ============ CONTACT STATE & FEEDBACK (from discreteBeam)
+    # Reaction force felt by the controller (robot arm) at the clamped end.
+    # Computed as: F_feedback = -sum(reactionForce[0:4]) (first two nodes).
+    # List of floats [Fx, Fy, ...] for all DOFs, or None.
+    reaction_force: list | None
+
+    # Wall contact state: which wall (if any) pins each node's x-DOF.
+    # cx[i] = wall index pinning node i's x-DOF, or -1 if free. None if no walls.
+    contact_x: list | None
+
+    # Wall contact state: which wall (if any) pins each node's y-DOF.
+    # cy[i] = wall index pinning node i's y-DOF, or -1 if free. None if no walls.
+    contact_y: list | None
+
     # ============ GLOBAL
     error: str | None
+    dt_failure_rejected: bool  # True when the last BC was rejected for exhausting the dt retry ladder
 
 
 def initial_controller_state(
@@ -90,20 +109,30 @@ def initial_controller_state(
         "q0_current":        initial_q0(physical_system),
         "u0_current":        initial_u0(physical_system),
         "ctime_current":     0.0,
-        "bc_current":        [0.0, 0.0, 0.0],
+        "bc_current":        [0.0, 0.0, -np.pi / 2],
         "bc_history":        [],
         "shape_history":     [],
+        "kappa_history":     [],
+        "error_history":     [],
         "q_history":         [],
-        "latest_config":     None,
+        "latest_config":     initial_q0(physical_system),
+        "kappa_dimensional": np.zeros(physical_system.nv),
+        "axial_strain":      np.zeros(physical_system.nv - 1),
         "config_writer":     config_writer,
         "target_shape":      target_shape,
         "converged":         False,
         "convergence_reason": "",
         "safety_rejections":  0,
         "decision":          {},
-        "plan":              "",
-        "result":            "",
+        "plan":   "",
+        "result": "",
+        "iteration":         0,
         "iteration_log":     [],
+        "attempt_count":     0,
         "eval_result":       {},
+        "reaction_force":    None,
+        "contact_x":         None,
+        "contact_y":         None,
         "error":             None,
+        "dt_failure_rejected": False,
     }

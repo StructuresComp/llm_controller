@@ -18,6 +18,7 @@
 #   python3 cli.py --target tip_reach --length 0.12
 #   python3 cli.py --target snake_L --config experiments/my_run.py
 #   python3 cli.py --target C --mode beam
+#   python3 cli.py --target C --provider ollama --model qwen2.5:14b --run-name qwen_C
 # ---------------------------------------------------------------------------
 
 import argparse
@@ -39,7 +40,7 @@ def parse_args():
         type=str,
         default="",
         metavar="SHAPE",
-        help="Target benchmark name: C, U, S, L, snake_L, tip_reach, or any registered case.",
+        help="Target benchmark name (any registered case in src/benchmarks/cases/).",
     )
     parser.add_argument(
         "--mode",
@@ -66,6 +67,27 @@ def parse_args():
         default=None,
         metavar="L",
         help="Override ROD_LENGTH (m).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Override config.MODEL (e.g. 'qwen2.5:14b', 'gpt-5.4', 'claude-haiku-4-5').",
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Override config.LLM_PROVIDER (e.g. 'anthropic', 'openai', 'ollama').",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Override config.RUN_NAME — output file stem: logs/<NAME>.jsonl + logs/<NAME>.log.",
     )
     parser.add_argument(
         "--config",
@@ -120,32 +142,30 @@ def _print_startup_summary(args, ps, cfg) -> None:
                   clamp, moving node 0 would just translate the whole beam under
                   gravity instead of bending it.
     """
-    from src.core.observation import describe_walls
-    sep = "─" * 65
+    sep = "=" * 65
     tol = getattr(cfg, "TOLERANCE_DISTANCE", None) or ps.rod_length * 1e-3
 
     print(sep)
-    print(f"LLM CONTROLLER  target={args.target or '(none)'}  model={cfg.MODEL}  mode={cfg.ORCHESTRATOR_MODE}")
+    print(f"LLM CONTROLLER  target={args.target or '(none)'}  provider={cfg.LLM_PROVIDER}  model={cfg.MODEL}  mode={cfg.ORCHESTRATOR_MODE}")
     print(sep)
 
     if ps.walls:
-        h_note = f"  [--H {abs(args.H)} → y = -{abs(args.H):.4f} m]" if args.H is not None else ""
-        print(f"Walls        : {len(ps.walls)} segment(s) — {describe_walls(ps.walls)}{h_note}")
+        h_note = f"  [--H {abs(args.H)} -> y = -{abs(args.H):.4f} m]" if args.H is not None else ""
+        print(f"Walls        : {len(ps.walls)} segment(s){h_note}")
     else:
         print("Walls        : none")
 
-    arm_nodes   = [0, 1]
-    fixed_nodes = [n for n in ps.controlled_nodes if n not in arm_nodes]
-    print(f"Arm nodes    : {arm_nodes}  (position + angle commanded each iteration)")
-    if fixed_nodes:
-        print(f"Fixed nodes  : {fixed_nodes}  (tip clamped — no walls, prevents rigid-body translation)")
+    print("Control topology:")
+    print("  Clamped end (node 0): YOU control position (x0, y0) and slope (theta) each iteration")
+    if ps.walls:
+        print("  Free end: Can deform freely; walls prevent penetration")
     else:
-        print("Fixed nodes  : none  (tip is free; walls constrain the beam)")
+        print("  Tip region (nodes nv-2, nv-1): Fixed in space — prevents unconstrained translation under gravity")
 
     print(f"Rod length   : {ps.rod_length:.4f} m")
 
     if ps.walls:
-        print(f"Safety check : nodes {arm_nodes} checked against walls; tolerance {tol:.4f} m")
+        print(f"Safety check : clamped end checked against walls; tolerance {tol:.4f} m")
     else:
         print("Safety check : disabled (no walls)")
 
@@ -167,6 +187,16 @@ def main():
     # Apply --debug flag to config
     if args.debug:
         config.DEBUG = True
+
+    # CLI overrides for LLM provider/model/run-name — applied after any --config
+    # overlay so these flags always win. Meant for parallel sweep scripts that
+    # vary model/provider/run_name per subprocess without generating overlay files.
+    if args.model is not None:
+        config.MODEL = args.model
+    if args.provider is not None:
+        config.LLM_PROVIDER = args.provider
+    if args.run_name is not None:
+        config.RUN_NAME = args.run_name
 
     # Downstream imports are deferred to here so the overlay is in effect before
     # any src module reads from config at import time.
@@ -200,8 +230,9 @@ def main():
     # no walls → [0,1,nv-2,nv-1]).
     if args.target:
         bm = get_benchmark(args.target)
-        if bm.walls is not None:
-            config.WALLS = bm.walls
+        if bm.walls:
+            print(f"Adding {len(bm.walls)} wall(s) specific to case '{args.target}' on top of config.WALLS.")
+            config.WALLS = config.WALLS + bm.walls
 
     if args.H is not None:
         H = abs(args.H)
@@ -213,6 +244,7 @@ def main():
 
     # Step 6 — initialize trajectory disk writer and build initial state.
     config_writer = ConfigWriter(run_name=config.RUN_NAME)
+    config_writer.write_header(ps, args.target)
     state  = initial_controller_state(physical_system=ps, target_shape=args.target, config_writer=config_writer)
 
     # Step 7 — run the control loop.
@@ -222,16 +254,41 @@ def main():
     finally:
         config_writer.close()
 
-    # Step 8 — print end-of-run summary.
+    # Step 8a — print orchestrator plan (if in plan mode)
+    if config.ORCHESTRATOR_MODE == "plan" and result.get("plan"):
+        print("\n" + "="*70)
+        print("ORCHESTRATOR PLAN (from LLM planning phase)")
+        print("="*70)
+        print(result["plan"])
+        print("="*70)
+
+    # Step 8b — print end-of-run summary.
     print("\n" + "="*70)
     print("CONTROL LOOP SUMMARY")
     print("="*70)
-    solved     = result.get("eval_result", {}).get("solved", False)
-    final_err  = result.get("eval_result", {}).get("error_percent", None)
+    solved        = result.get("eval_result", {}).get("solved", False)
+    final_err     = result.get("eval_result", {}).get("error_percent", None)
+    iterations_done = len(result["iteration_log"])
+    attempts_used = result.get("attempt_count", 0)
     print(f"\nTarget     : {result['target_shape'] or '(none)'}")
     print(f"Solved     : {solved}" + (f"  (error={final_err:.2f}%)" if final_err is not None else ""))
-    print(f"LLM judged : {result['converged']}  (recorded for analysis; does not control termination)")
-    print(f"Iterations : {len(result['iteration_log'])} / {config.MAX_ITERATIONS}")
+    print(f"Iterations : {iterations_done} / {config.MAX_ITERATIONS}")
+    print(f"Attempts   : {attempts_used} / {config.MAX_ITERATIONS_WITH_REJECTIONS}  "
+          f"(includes retried/rejected/extraction-fallback decisions, not just completed iterations)")
+
+    # If we stopped short of MAX_ITERATIONS without solving or hitting a fatal error,
+    # the only remaining termination path is _after_safety's attempt-cap check in
+    # workflow.py -- surface that clearly instead of leaving it to be inferred.
+    if not solved and not result.get("error") and iterations_done < config.MAX_ITERATIONS \
+            and attempts_used >= config.MAX_ITERATIONS_WITH_REJECTIONS:
+        print(
+            f"\n[TERMINATED] Hit MAX_ITERATIONS_WITH_REJECTIONS: {attempts_used} total LLM "
+            f"attempts (successful + retried + rejected) reached the cap of "
+            f"{config.MAX_ITERATIONS_WITH_REJECTIONS} after only "
+            f"{iterations_done}/{config.MAX_ITERATIONS} real iterations completed. "
+            f"Raise MAX_ITERATIONS_WITH_REJECTIONS in config.py to allow more retry/rejection "
+            f"overhead per run."
+        )
 
     if result["iteration_log"]:
         print("\nIteration log:")
@@ -242,7 +299,7 @@ def main():
             tip_y     = entry["tip_y"]
             status = " [CONVERGED]" if (iteration == len(result["iteration_log"]) and result["converged"]) else ""
             print(f"  {iteration:3d}.  x0={decision['x0']:+.4f}  y0={decision['y0']:+.4f}  "
-                  f"θ={decision['theta']:+.4f}  → tip: ({tip_x:+.6f}, {tip_y:+.6f}){status}")
+                  f"theta={decision['theta']:+.4f}  -> tip: ({tip_x:+.6f}, {tip_y:+.6f}){status}")
 
     print(f"\nTrajectory snapshots   : {config_writer.snapshot_count}  (streamed to {config_writer.filepath.name})")
 
@@ -250,6 +307,9 @@ def main():
         print(f"\n[ERROR] {result['error']}")
 
     print("="*70)
+
+    if result.get("error"):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

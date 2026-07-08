@@ -4,16 +4,24 @@
 # LangGraph master workflow.
 #
 # Topology:
-#   [START] → orchestrator → safety ──(violation)──→ orchestrator
-#                  ↑               └──(safe)──→ programmer → evaluator
-#                  └──────────────────────────────────(loop)──┘
+#   [START] → orchestrator ──(LLM tool call failed, all retries exhausted)──→ [END]
+#                  ↑        └──(ok)──→ safety ──(violation)──→ orchestrator
+#                  |                       └──(safe)──→ programmer ──(dt exhausted, QUIT_ON_DT_FAILURE=False)──→ orchestrator
+#                  |                                        |──(dt exhausted, QUIT_ON_DT_FAILURE=True)──→ [END]
+#                  |                                        └──(success)──→ evaluator
+#                  └───────────────────────────────────────────────────────────────(loop)──┘
 #
 # The orchestrator is itself a compiled sub-graph (planner → decision).
 # The loop runs until the evaluator reports solved, the programmer sets
 # state["error"] (physics failure), or MAX_ITERATIONS is reached. Safety
-# violations route back to the orchestrator without counting as iterations,
-# but the run ends after MAX_SAFETY_REJECTIONS consecutive rejections so the
-# orchestrator↔safety loop cannot spin forever.
+# failures are either terminal or rejected back to the orchestrator depending on
+# QUIT_ON_DT_FAILURE. decision_node retries failed LLM tool calls up to
+# config.TOOL_CALL_ATTEMPTS times before an extraction fallback; exhausting all
+# attempts ends the run immediately. Safety violations and recoverable dt-failure
+# rejections route back to the orchestrator without counting as completed
+# iterations, but attempt_count still bounds them via MAX_ITERATIONS_WITH_REJECTIONS.
+# Safety violations and recoverable dt-failure rejections both route back to the
+# orchestrator — they never reach the evaluator, so they do not count as iterations.
 # ---------------------------------------------------------------------------
 
 from langgraph.graph import END, StateGraph
@@ -26,19 +34,29 @@ from src.agents.programmer_agent import programmer_node
 from src.agents.evaluator_agent import evaluator_node
 
 
-def _after_safety(state: ControllerState) -> str:
-    """Route after safety check.
+def _after_orchestrator(state: ControllerState) -> str:
+    """Route after orchestrator: end if the LLM tool call failed after all retries
+    (config.TOOL_CALL_ATTEMPTS exhausted), else safety."""
+    return "end" if state.get("error") else "safety"
 
-    Safe BC → programmer. Violation → retry via the orchestrator, but end the
-    run once MAX_SAFETY_REJECTIONS consecutive rejections have piled up — this
-    bounds the otherwise-unbounded orchestrator↔safety loop (a weak model can
-    repeatedly propose wall-violating BCs and never reach an iteration).
+
+def _after_safety(state: ControllerState) -> str:
+    """Route after safety check: back to orchestrator on violation, else programmer.
+
+    Hard-stops if total attempts (successful iterations + rejections) exceed
+    MAX_ITERATIONS_WITH_REJECTIONS, so a stuck LLM can't loop on rejections forever.
     """
-    if not state.get("error"):
-        return "programmer"
-    if state.get("safety_rejections", 0) >= config.MAX_SAFETY_REJECTIONS:
+    if state.get("attempt_count", 0) >= config.MAX_ITERATIONS_WITH_REJECTIONS:
         return "end"
-    return "orchestrator"
+    return "orchestrator" if state.get("error") else "programmer"
+
+
+def _after_programmer(state: ControllerState) -> str:
+    """Route after programmer: end on unrecoverable dt failure (or QUIT_ON_DT_FAILURE),
+    back to orchestrator on a recoverable dt-failure rejection, else evaluator."""
+    if state.get("error"):
+        return "end" if config.QUIT_ON_DT_FAILURE else "orchestrator"
+    return "evaluator"
 
 
 def _should_continue(state: ControllerState) -> str:
@@ -50,8 +68,6 @@ def _should_continue(state: ControllerState) -> str:
 
     Hard stop: if MAX_ITERATIONS is reached, end regardless of solve status.
     """
-    if state.get("error"):
-        return "end"
     if state.get("eval_result", {}).get("solved", False):
         return "end"
     if len(state.get("iteration_log", [])) >= config.MAX_ITERATIONS:
@@ -68,13 +84,21 @@ def build_controller_graph():
     graph.add_node("evaluator",    evaluator_node)
 
     graph.set_entry_point("orchestrator")
-    graph.add_edge("orchestrator", "safety")
+    graph.add_conditional_edges(
+        "orchestrator",
+        _after_orchestrator,
+        {"safety": "safety", "end": END},
+    )
     graph.add_conditional_edges(
         "safety",
         _after_safety,
         {"orchestrator": "orchestrator", "programmer": "programmer", "end": END},
     )
-    graph.add_edge("programmer", "evaluator")
+    graph.add_conditional_edges(
+        "programmer",
+        _after_programmer,
+        {"orchestrator": "orchestrator", "evaluator": "evaluator", "end": END},
+    )
     graph.add_conditional_edges(
         "evaluator",
         _should_continue,

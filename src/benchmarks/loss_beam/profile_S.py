@@ -1,38 +1,21 @@
 """
-S-shape curvature profile: full-sine, one inflection point, net turn ≈ 0.
+S-shape curvature profile: two opposite bowls via full-sine with terminal curls.
 
 Exports:
-    profile_s(s_norm, amplitude)  — ideal turning angle at normalised arc-length s
-    fit_s(s_norm, dtheta)         — fit amplitude to observed turning angles
+    kappa_s(s_norm, rod_length, As, Aend, sig) — curvature density as function of arc-length
 """
 
 import numpy as np
 
 
-def profile_s(s_norm: np.ndarray, amplitude: float = 0.5) -> np.ndarray:
-    """theta*(s) = amplitude * sin(2π*s)  — symmetric S, net turn = 0."""
-    return amplitude * np.sin(2 * np.pi * s_norm)
-
-
-# Target amplitude for the feasible S case — must match beam_S.reference_fn's amplitude.
-TARGET_AMPLITUDE = 1.2
-
-
-def make_fit_s(target_amplitude: float):
-    """Build a fixed-target S fit pinned to `target_amplitude` (sign read from data).
-
-    Pinning (the fit_u pattern) makes profile_loss a fixed-target metric: a
-    straight beam (dtheta ≈ 0) reconstructs a full S and scores high error,
-    instead of free-fitting amplitude ≈ 0 and spuriously scoring ~0%. The
-    factory lets a harder cell (e.g. S_infeasible) pin a larger amplitude
-    without duplicating the fit logic.
+def kappa_s(s_norm: np.ndarray, rod_length: float = 1.0, As: float = 10.0, Aend: float = 3.0, sig: float = 0.30) -> np.ndarray:
     """
-    def _fit(s_norm: np.ndarray, dtheta: np.ndarray) -> dict:
-        basis = np.sin(2 * np.pi * s_norm)
-        sign = float(np.sign(np.dot(dtheta, basis))) or 1.0
-        return {"amplitude": sign * target_amplitude}
-    return _fit
+    Curvature function for S-shape.
 
-
-# Default S fit, pinned to the feasible-cell amplitude.
-fit_s = make_fit_s(TARGET_AMPLITUDE)
+    kappa = 2*tan(theta/2) / dL, normalized by rod_length.
+    """
+    base         = As * np.sin(2.0 * np.pi * s_norm)
+    bottom_curl  = np.exp(-(s_norm / sig)**2)
+    top_curl     = np.exp(-((1.0 - s_norm) / sig)**2)
+    kappa_raw    = base + Aend * (bottom_curl - top_curl)
+    return kappa_raw / rod_length

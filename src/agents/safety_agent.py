@@ -12,7 +12,7 @@
 # No LLM calls — entirely deterministic geometry.
 #
 # Section order:
-#   1. Imports  2. Helpers  3. Node  4. Main  5. Entry
+#   1. Imports  2. Schemas  3. Prompts  4. Helpers  5. Nodes  7. Main  8. Entry
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -26,7 +26,19 @@ from src.tools.walls import signed_dist_2d, within_extent_2d
 
 
 # ---------------------------------------------------------------------------
-# 2. HELPERS
+# 2. SCHEMAS
+# ---------------------------------------------------------------------------
+# No schemas needed — no LLM calls.
+
+
+# ---------------------------------------------------------------------------
+# 3. PROMPTS
+# ---------------------------------------------------------------------------
+# No LLM prompts needed.
+
+
+# ---------------------------------------------------------------------------
+# 4. HELPERS
 # ---------------------------------------------------------------------------
 
 def check_bc_wall_safety(
@@ -58,11 +70,11 @@ def check_bc_wall_safety(
         if abs(n[1]) >= abs(n[0]):
             wall_desc = f"horizontal wall at y={d / n[1]:.4f} m"
             safe_coord = (d + tolerance) / n[1]
-            safe_hint  = f"; y must be {'≥' if n[1] > 0 else '≤'} {safe_coord:.4f} m"
+            safe_hint  = f"; y must be {'>=' if n[1] > 0 else '<='} {safe_coord:.4f} m"
         else:
             wall_desc = f"vertical wall at x={d / n[0]:.4f} m"
             safe_coord = (d + tolerance) / n[0]
-            safe_hint  = f"; x must be {'≥' if n[0] > 0 else '≤'} {safe_coord:.4f} m"
+            safe_hint  = f"; x must be {'>=' if n[0] > 0 else '<='} {safe_coord:.4f} m"
         violations.append(
             f"{wall_desc} (signed distance = {dist:+.4f} m, required >= {tolerance:.4f} m{safe_hint})"
         )
@@ -70,7 +82,7 @@ def check_bc_wall_safety(
 
 
 # ---------------------------------------------------------------------------
-# 3. NODE
+# 5. NODES
 # ---------------------------------------------------------------------------
 
 def safety_node(state: ControllerState) -> dict:
@@ -115,7 +127,7 @@ def safety_node(state: ControllerState) -> dict:
 
     iter_num = len(state.get("iteration_log", [])) + 1
     print(f"\n[Safety] BC REJECTED  (before iteration {iter_num})")
-    print(f"         x0={x0:+.6f} m  y0={y0:+.6f} m  θ={theta:+.6f} rad")
+    print(f"         x0={x0:+.6f} m  y0={y0:+.6f} m  theta={theta:+.6f} rad")
     for v in violations:
         print(f"         • {v}")
     print("         Routing back to orchestrator.\n")
@@ -130,7 +142,7 @@ def safety_node(state: ControllerState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 4. MAIN
+# 7. MAIN
 # ---------------------------------------------------------------------------
 
 def main():
@@ -167,7 +179,7 @@ def main():
 
 
 # ---------------------------------------------------------------------------
-# 5. ENTRY POINT
+# 8. ENTRY POINT
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
