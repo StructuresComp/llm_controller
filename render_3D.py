@@ -19,6 +19,11 @@ from pathlib import Path
 from src.core.paths import LOGS_DIR, VISUALIZATION_DIR
 from src.visualization.mechview_export import convert
 
+# Keep every Nth trajectory snapshot as a mechview frame (1 = every frame). Final
+# frame is always kept regardless. A viewer display preference, not part of the
+# run's own configuration -- kept local rather than in src/core/config.py.
+FRAME_STRIDE = 1
+
 
 def latest_run(logs_dir: Path) -> Path | None:
     runs = sorted(logs_dir.glob("*.jsonl"))
@@ -30,13 +35,17 @@ def load_run(path: Path) -> dict:
     if path.suffix == ".jsonl":
         from src.core import config
         from src.tools.walls import make_wall_2d
-        walls = [make_wall_2d(w) for w in getattr(config, "WALLS", [])]
+        with path.open() as f:
+            header = json.loads(f.readline())
+        ps_info = header["physical_system"]
+        walls   = [make_wall_2d(w) for w in ps_info["walls"]]
         return {
             "physics_type":    getattr(config, "PHYSICS_TYPE", "beam"),
-            "nv":              config.NV,
-            "rod_length":      config.ROD_LENGTH,
+            "nv":              ps_info["nv"],
+            "rod_length":      ps_info["rod_length"],
             "r0":              config.R0,
             "walls":           walls,
+            "target_tip":      header.get("target_tip"),  # None for non-tip-type cases
             "trajectory_file": path.stem,
         }
     return json.loads(path.read_text())
@@ -59,7 +68,8 @@ def main():
     VISUALIZATION_DIR.mkdir(exist_ok=True)
 
     raw = load_run(raw_path)
-    convert(raw, VISUALIZATION_DIR / "data.js")
+    convert(raw, VISUALIZATION_DIR / "data.js", frame_stride=FRAME_STRIDE,
+            target_tip=raw.get("target_tip"))
 
     src = importlib.resources.files("mechview") / "index.html"
     with importlib.resources.as_file(src) as p:

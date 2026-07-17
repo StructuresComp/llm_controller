@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
 
-from src.tools.walls import penetrated_2d, plot_walls_2d
+from src.tools.walls import check_q_against_walls, penetrated_2d, plot_walls_2d
 from src.models.physical_system import initial_q0, initial_u0
 
 
@@ -835,19 +835,14 @@ def discreteBeam(
   controlled_nodes = physical_system.controlled_nodes
 
   # Compatibility check: reject if any free initial node already penetrates a wall.
-  if walls:
-    controlled_set = set(controlled_nodes)
-    for i in range(nv):
-      if i in controlled_set:
-        continue
-      px, py = float(q0[2*i]), float(q0[2*i + 1])
-      for wall in walls:
-        if penetrated_2d(px, py, wall):
-          raise ValueError(
-            f"Node {i} at ({px:.4f}, {py:.4f}) already penetrates a wall "
-            f"(n={wall['n']}, d={wall['d']:.4f}) in the initial configuration. "
-            "Adjust q0 or wall positions before calling discreteBeam."
-          )
+  violations = check_q_against_walls(q0, nv, walls, controlled_nodes)
+  if violations:
+    v = violations[0]
+    raise ValueError(
+      f"Node {v['node']} at ({v['x']:.4f}, {v['y']:.4f}) already penetrates a wall "
+      f"(n={v['wall']['n']}, d={v['wall']['d']:.4f}) in the initial configuration. "
+      "Adjust q0 or wall positions before calling discreteBeam."
+    )
 
   fixed_index = np.array([dof for node in controlled_nodes for dof in (2*node, 2*node + 1)])
   free_index  = np.setdiff1d(all_DOFs, fixed_index)

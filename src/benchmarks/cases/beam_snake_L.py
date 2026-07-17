@@ -8,7 +8,7 @@ Run standalone:
 
 from src.benchmarks import BenchmarkCase, register
 
-_TARGET = (0.05, -0.11)
+_TARGET = (0.15, -0.22)
 
 
 class SnakeLCase(BenchmarkCase):
@@ -21,18 +21,16 @@ class SnakeLCase(BenchmarkCase):
     # L-shaped tube: vertical entry channel x ∈ [-0.01, +0.01] (top open),
     # turning into a horizontal exit channel y ∈ [-0.12, -0.10] going right to x = +0.12.
     walls = [
-        {"P0": [-0.02,  -0.02], "P1": [-0.02, -0.12]},   # left wall of vertical channel
-        {"P0": [-0.02,  -0.12], "P1": [ 0.12, -0.12]},   # floor
-        {"P0": [ 0.12,  -0.08], "P1": [ 0.02, -0.08]},   # ceiling of horizontal channel
-        {"P0": [ 0.02,  -0.08], "P1": [ 0.02, -0.02]},   # right wall of vertical channel
+        {"P0": [-0.02,  -0.02], "P1": [-0.02, -0.22]},   # left wall of vertical channel
+        {"P0": [-0.02,  -0.22], "P1": [ 0.12, -0.22]},   # floor
+        {"P0": [ 0.12,  -0.18], "P1": [ 0.02, -0.18]},   # ceiling of horizontal channel
+        {"P0": [ 0.02,  -0.18], "P1": [ 0.02, -0.02]},   # right wall of vertical channel
     ]
 
     target_description = (
         f"Navigate the free tip through an L-shaped tube and reach "
-        f"({_TARGET[0]:.2f}, {_TARGET[1]:.2f}) m inside the horizontal exit channel.\n"
-        f"Strategy: drive node 0 straight down (theta ~ -pi/2) to push the tip through "
-        f"the vertical slot, then rotate theta toward 0 once the tip clears the corner "
-        f"at y ~ -0.10 m to bend it rightward along the horizontal channel."
+        f"({_TARGET[0]:.2f}, {_TARGET[1]:.2f}) m just outside the horizontal exit channel. "
+        f"The tubes are described using the walls (physical obstacles) earlier in the prompt."
     )
 
 

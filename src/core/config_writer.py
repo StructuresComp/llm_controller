@@ -74,8 +74,13 @@ class ConfigWriter:
         self.file.flush()  # force to disk immediately
         self.snapshot_count += 1
 
-    def write_header(self, ps, target_shape: str = ""):
-        """Write a one-time metadata header as the first JSONL line."""
+    def write_header(self, ps, target_shape: str = "", target_tip=None):
+        """
+        Write a one-time metadata header as the first JSONL line.
+
+        target_tip: optional (target_x, target_y) for loss_type="tip" cases
+        (tip_reach, snake_L); omitted from the header when None.
+        """
         walls_user = [
             {"P0": w["P0"].tolist(), "P1": w["P1"].tolist()}
             for w in getattr(ps, "walls", [])
@@ -92,6 +97,8 @@ class ConfigWriter:
                 "walls":      walls_user,
             },
         }
+        if target_tip is not None:
+            header["target_tip"] = list(target_tip)
         self.file.write(json.dumps(header) + "\n")
         self.file.flush()
 

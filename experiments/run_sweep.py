@@ -52,25 +52,61 @@ SWEEP_LOGS_DIR = Path(__file__).resolve().parent / "sweep_logs"
 # SWEEP CONFIGURATION — edit these to change what gets run.
 # ---------------------------------------------------------------------------
 
+# (model, provider) pairs — provider is passed straight to cli.py's --provider flag.
 MODELS = [
-    "qwen2.5:14b",
-    # "qwen2.5-coder:14b",
-    # "phi4",
-    "mistral-nemo",
-    "gemma3:12b",
-    "olmo2:13b",
+    # Anthropic
+    ("claude-fable-5",                "anthropic"),
+    ("claude-opus-4-8",               "anthropic"),
+    ("claude-opus-4-7",               "anthropic"),
+    ("claude-opus-4-6",               "anthropic"),
+    ("claude-opus-4-5-20251101",      "anthropic"),
+
+    ("claude-sonnet-5",                "anthropic"),
+    ("claude-sonnet-4-6",              "anthropic"),
+    ("claude-sonnet-4-5-20250929",     "anthropic"),
+
+    ("claude-haiku-4-5",               "anthropic"),
+
+    # OpenAI
+    ("gpt-5.6",               "openai"),
+    ("gpt-5.5",               "openai"),
+    ("gpt-5.4",               "openai"),
+    ("gpt-5.3-codex",         "openai"),
+    ("gpt-5.2",               "openai"),
+    ("gpt-5",                 "openai"),
+    ("gpt-4.1",               "openai"),
+    ("o3",                    "openai"),
+    ("o3-pro",                "openai"),
+
+    # Google Gemini
+    ("gemini-3.5-flash",      "gemini"),
+    ("gemini-3.1-pro-preview","gemini"),
+    ("gemini-2.5-pro",        "gemini"),
+
+    # Ollama
+    ("qwen2.5:14b",           "ollama"),
+    ("qwen2.5-coder:14b",     "ollama"),
+    ("phi4",                  "ollama"),
+    ("mistral-nemo",          "ollama"),
+    ("gemma3:12b",            "ollama"),
+    ("olmo2:13b",             "ollama"),
 ]
 
 TARGETS = [
+    "tip_reach",
     # "C",
-    "U",
-    "S",
+    # "U",
+    # "S",
     # "L",
     # "arc",
     # "sine",
 ]
 
 REPETITIONS = 1  # repeats per (model, target) pair — bump for stochastic-behavior statistics
+
+# Providers cli.py/llm_wrapper actually support. Checked upfront (validate_models())
+# so a typo'd provider fails in the first second, not partway through an overnight sweep.
+_KNOWN_PROVIDERS = {"anthropic", "openai", "gemini", "ollama", "fake"}
 
 
 # ---------------------------------------------------------------------------
@@ -82,18 +118,48 @@ def _sanitize(name: str) -> str:
     return name.replace(":", "-").replace("/", "-")
 
 
+def validate_models() -> None:
+    """
+    Fail fast on malformed MODELS entries, before any subprocess is launched.
+
+    This only catches structural mistakes (wrong shape, unknown provider) --
+    it can't catch a genuinely misspelled model name (e.g. "qwen2.5:14"), since
+    that's only detectable by actually calling the provider. That case is still
+    safe: run_one() isolates each (model, target, rep) in its own subprocess, so
+    one bad model only fails its own runs -- the rest of an overnight sweep
+    continues untouched (see run_one() and main()'s use of Pool.map).
+    """
+    problems = []
+    for i, entry in enumerate(MODELS):
+        if not (isinstance(entry, tuple) and len(entry) == 2):
+            problems.append(f"MODELS[{i}] = {entry!r} -- expected a (model, provider) tuple")
+            continue
+        _, provider = entry
+        if provider not in _KNOWN_PROVIDERS:
+            problems.append(
+                f"MODELS[{i}] = {entry!r} -- unknown provider {provider!r}, "
+                f"expected one of {sorted(_KNOWN_PROVIDERS)}"
+            )
+    if problems:
+        print("MODELS is misconfigured -- refusing to start the sweep:")
+        for p in problems:
+            print(f"  {p}")
+        sys.exit(1)
+
+
 def build_commands() -> list[tuple[str, str]]:
     """One (stem, chained shell command) pair per (model, target, repetition)."""
     python_exe = shlex.quote(sys.executable)
     viz_dir = shlex.quote(str(VISUALIZATION_DIR))
 
     commands = []
-    for model in MODELS:
+    for model, provider in MODELS:
         for target in TARGETS:
             for rep in range(1, REPETITIONS + 1):
                 stem = f"{_sanitize(model)}_{target}_run_{rep:02d}"
                 run_cmd = (
-                    f"{python_exe} cli.py --provider ollama --model {shlex.quote(model)} "
+                    f"{python_exe} cli.py --provider {shlex.quote(provider)} "
+                    f"--model {shlex.quote(model)} "
                     f"--target {shlex.quote(target)} --run-name {shlex.quote(stem)}"
                 )
                 plot_cmd = (
@@ -150,9 +216,10 @@ def main():
     parser = argparse.ArgumentParser(description="Sweep the LLM controller across models and targets.")
     parser.add_argument(
         "--processes", type=int, default=1, metavar="N",
-        help="Number of parallel processes (default: 1). All models here share one "
-             "Ollama server, so raising this doesn't parallelize the LLM calls themselves "
-             "beyond what the server can actually serve concurrently.",
+        help="Number of parallel processes (default: 1). Ollama-routed models share one "
+             "Ollama server, so raising this doesn't parallelize those calls beyond what "
+             "the server can actually serve concurrently -- cloud-provider entries "
+             "(anthropic/openai/gemini) are independently rate-limited by that provider.",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -160,6 +227,7 @@ def main():
     )
     args = parser.parse_args()
 
+    validate_models()
     commands = build_commands()
     print(
         f"Built {len(commands)} commands "

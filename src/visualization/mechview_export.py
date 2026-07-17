@@ -24,10 +24,11 @@ from pathlib import Path
 
 # Visual constants — all in normalised units (rod_length = 1).
 # generate_synthetic.py imports these so wall appearance stays consistent.
-WALL_WIDTH        = 2.0   # obstacle box x-extent
-WALL_DEPTH        = 2.0   # obstacle box z-extent
-WALL_THICKNESS    = 0.04  # obstacle box y-extent
-TUBE_RADIUS_SCALE = 0.5   # r0/rod_length multiplied by this for the visual tube
+WALL_WIDTH         = 2.0   # obstacle box x-extent
+WALL_DEPTH         = 2.0   # obstacle box z-extent
+WALL_THICKNESS     = 0.04  # obstacle box y-extent
+TUBE_RADIUS_SCALE  = 0.5   # r0/rod_length multiplied by this for the visual tube
+TARGET_MARKER_SIZE = 0.05  # small cube marking a tip-type case's target (x, y); cube edge length
 
 
 def _nodes_from_q(q: list, nv: int, physics_type: str) -> list:
@@ -39,12 +40,13 @@ def _nodes_from_q(q: list, nv: int, physics_type: str) -> list:
         raise ValueError(f"Unknown physics_type: {physics_type!r}")
 
 
-def convert(raw: dict, output_path: Path) -> None:
+def convert(raw: dict, output_path: Path, frame_stride: int = 1, target_tip=None) -> None:
     physics_type = raw["physics_type"]
     nv           = raw["nv"]
     rod_length   = float(raw["rod_length"])
     r0           = float(raw.get("r0", 0.003))
     walls_raw    = raw.get("walls", [])        # list of {n, d, P0, P1} dicts; empty = no wall
+    frame_stride = max(frame_stride, 1)        # keep every Nth frame; final frame always kept
 
     scale = 1.0 / rod_length
 
@@ -72,29 +74,37 @@ def convert(raw: dict, output_path: Path) -> None:
             from src.core.paths import LOGS_DIR
             jsonl_path = LOGS_DIR / f"{trajectory_file}.jsonl"
             if jsonl_path.exists():
-                frame_idx = 0
+                snapshots = []
                 with open(jsonl_path, "r") as f:
                     for line in f:
                         if line.strip():
                             snap = json.loads(line)
                             if snap.get("type") == "header":
                                 continue
-                            q_raw = snap["q"]
-                            nodes = _nodes_from_q(q_raw, nv, physics_type)
-                            nodes_n = [[x * scale, y * scale, z * scale] for x, y, z in nodes]
-                            frame = {"t": frame_idx, "nodes": nodes_n}
+                            snapshots.append(snap)
 
-                            # Optionally annotate with BC command
-                            bc = snap.get("bc", {})
-                            error = snap.get("error_percent", 0)
-                            frame["label"] = (
-                                f"Iter {snap.get('iteration')}  "
-                                f"x={bc.get('x0', 0):+.4f}  y={bc.get('y0', 0):+.4f}  "
-                                f"θ={bc.get('theta', 0):+.3f}  error={error:.1f}%"
-                            )
+                last_idx = len(snapshots) - 1
+                frame_idx = 0
+                for i, snap in enumerate(snapshots):
+                    if i % frame_stride != 0 and i != last_idx:
+                        continue  # thinned out — frame_stride keeps every Nth, plus the final one
 
-                            frames.append(frame)
-                            frame_idx += 1
+                    q_raw = snap["q"]
+                    nodes = _nodes_from_q(q_raw, nv, physics_type)
+                    nodes_n = [[x * scale, y * scale, z * scale] for x, y, z in nodes]
+                    frame = {"t": frame_idx, "nodes": nodes_n}
+
+                    # Optionally annotate with BC command
+                    bc = snap.get("bc", {})
+                    error = snap.get("error_percent", 0)
+                    frame["label"] = (
+                        f"Iter {snap.get('iteration')}  "
+                        f"x={bc.get('x0', 0):+.4f}  y={bc.get('y0', 0):+.4f}  "
+                        f"θ={bc.get('theta', 0):+.3f}  error={error:.1f}%"
+                    )
+
+                    frames.append(frame)
+                    frame_idx += 1
             else:
                 print(f"Warning: trajectory file {jsonl_path} not found", file=sys.stderr)
 
@@ -124,10 +134,24 @@ def convert(raw: dict, output_path: Path) -> None:
                 "size":   [WALL_THICKNESS, height, WALL_DEPTH],
             })
 
+    rod_radius_visual = r0 * scale * TUBE_RADIUS_SCALE
+
+    # Target marker — only for tip-type cases (tip_reach, snake_L); target_tip is
+    # None for curvature-type cases (C/S/U/L/arc/sine), which have no single target
+    # point, so nothing is added and the render is unaffected. Z is offset slightly
+    # positive (2x the visual rod radius) so the marker doesn't get visually
+    # absorbed inside the beam tube, which is rendered at z=0.
+    if target_tip is not None:
+        tx, ty = target_tip
+        obstacles.append({
+            "center": [tx * scale, ty * scale, 2 * rod_radius_visual],
+            "size":   [TARGET_MARKER_SIZE, TARGET_MARKER_SIZE, TARGET_MARKER_SIZE],
+        })
+
     data = {
         "object_type": physics_type,   # "beam" or "rod" — mechview renders both as a tube
         "nv":          nv,
-        "rod_radius":  r0 * scale * TUBE_RADIUS_SCALE,
+        "rod_radius":  rod_radius_visual,
         "obstacles":   obstacles,
         "frames":      frames,
     }
@@ -141,6 +165,8 @@ def main():
     p = argparse.ArgumentParser(description="Convert raw run JSON to mechview data.js.")
     p.add_argument("input", help="path to raw run JSON (e.g. logs/run_1234567890.json)")
     p.add_argument("--out", default="data.js", help="output path (default: ./data.js)")
+    p.add_argument("--frame-stride", type=int, default=1, metavar="N",
+                    help="keep every Nth frame (default: 1 = every frame). Final frame always kept.")
     args = p.parse_args()
 
     raw_path = Path(args.input)
@@ -149,7 +175,7 @@ def main():
         sys.exit(1)
 
     raw = json.loads(raw_path.read_text())
-    convert(raw, Path(args.out))
+    convert(raw, Path(args.out), frame_stride=args.frame_stride)
 
 
 if __name__ == "__main__":

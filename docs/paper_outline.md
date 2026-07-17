@@ -17,6 +17,14 @@ The physical system is not merely a robotics benchmark. It is a controlled scien
 We release a standardized closed-loop benchmark for evaluating LLM agents on deformable-object control tasks involving free-space boundary control, contact-mediated shaping, and infeasible/stress objectives.
 
 ---
+### Findings as of July 4, 2026
+1. **Closed-loop physical feedback exposes failures that static LLM benchmarks miss:** models that look strong in language/coding can become unstable when their actions accumulate in a nonlinear deformable system.
+2. **Embodied LLM agents have model-specific dynamical signatures**—smooth undercorrection, high-gain oscillation, branch trapping, recovery failure, sign-convention errors, and geometric disorder growth.
+3. **Greater model capability does not guarantee better physical agency:** smarter models may overinterpret feedback, make larger strategic moves, enter bad nonlinear branches, and finish worse than more conservative models.
+4. **LLMs often fail at grounding signed geometry into action:** they may verbally understand curvature/orientation conventions but still apply controls consistent with flipped arc-length, curvature sign, endpoint frame, or integral limits.
+5. **The key contribution is a new measurement framework:** deformable rods/beams act as controlled physical instruments for quantifying the stability, entropy, and recoverability of embodied LLM agents, not merely their final task success.
+
+---
 
 ## Unified Closed-Loop View
 
@@ -47,8 +55,9 @@ In plain terms:
 * A model that oscillates in language tends to oscillate in physical control.
 * A model that is highly persistent in language tends to produce smoother but slower physical correction.
 * A model that fails to recognize inconsistent language constraints tends to struggle with physically infeasible control objectives.
+* A model that accumulates small errors in language revision tends to accumulate physical state errors during closed-loop control.
 
-The goal is not to prove that language and mechanics are the same. The goal is to show that the decision-update behavior of the agent has stable quantitative properties that can be measured in both domains.
+Physical control is important because it does not reset after each mistake: the agent must continue acting from the state created by its previous decisions. The goal is not to prove that language and mechanics are the same. The goal is to show that the decision-update behavior of the agent has stable quantitative properties that can be measured in both domains.
 
 ---
 

@@ -87,12 +87,14 @@ def parse_stem(stem: str, target: str) -> tuple[str, int] | None:
 def load_run(jsonl_path: Path) -> dict:
     """
     Load one run's JSONL file. Returns:
-      {"rod_length": float, "target_shape": str, "iterations": [{"iteration", "bc", "error_percent"}, ...]}
+      {"rod_length": float, "target_shape": str, "target_tip": [x,y] | None,
+       "iterations": [{"iteration", "bc", "error_percent"}, ...]}
     Multiple snapshots can share one iteration (SAVE_STRIDE > 1) — only the
     last snapshot per iteration is kept, matching what the run actually scored.
     """
     rod_length = None
     target_shape = None
+    target_tip = None
     by_iteration: dict[int, dict] = {}
 
     with open(jsonl_path) as f:
@@ -104,11 +106,13 @@ def load_run(jsonl_path: Path) -> dict:
             if record.get("type") == "header":
                 rod_length = record["physical_system"]["rod_length"]
                 target_shape = record.get("target_shape")
+                target_tip = record.get("target_tip")
                 continue
             by_iteration[record["iteration"]] = record  # last write wins
 
     iterations = [by_iteration[i] for i in sorted(by_iteration)]
-    return {"rod_length": rod_length, "target_shape": target_shape, "iterations": iterations}
+    return {"rod_length": rod_length, "target_shape": target_shape,
+            "target_tip": target_tip, "iterations": iterations}
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +342,10 @@ def make_figures(rows: list[dict], runs: dict[str, dict], figures_dir: Path) -> 
         q = np.array(runs[row["stem"]]["iterations"][-1]["q"])
         nodes = q.reshape(-1, 2)
         ax.plot(nodes[:, 0], nodes[:, 1], "o-")
+        target_tip = runs[row["stem"]].get("target_tip")
+        if target_tip is not None:
+            ax.plot(target_tip[0], target_tip[1], "r*", markersize=16, label="target")
+            ax.legend(fontsize=8)
         ax.set_aspect("equal")
         ax.set_title(f"{label}: {row['stem']}")
         ax.grid(alpha=0.3)

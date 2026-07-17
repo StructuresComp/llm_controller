@@ -110,6 +110,27 @@ def penetrated_2d(px: float, py: float, wall: dict) -> bool:
     return signed_dist_2d(px, py, wall) < 0 and within_extent_2d(px, py, wall)
 
 
+def check_q_against_walls(q: list, nv: int, walls: list, controlled_nodes: list) -> list:
+    """
+    Return a list of violation dicts for every free node whose position in q
+    already penetrates a wall: {"node": i, "x": px, "y": py, "wall": wall}.
+    Empty list = no violations (including the no-walls case: walls == []).
+
+    Free nodes = all nodes except controlled_nodes (which the safety agent and
+    the physics tool never subject to wall contact logic).
+    """
+    controlled_set = set(controlled_nodes)
+    violations = []
+    for i in range(nv):
+        if i in controlled_set:
+            continue
+        px, py = float(q[2*i]), float(q[2*i + 1])
+        for wall in walls:
+            if penetrated_2d(px, py, wall):
+                violations.append({"node": i, "x": px, "y": py, "wall": wall})
+    return violations
+
+
 def plot_wall_2d(ax, wall: dict) -> None:
     """Draw one 2D wall segment on a matplotlib Axes."""
     P0, P1 = wall["P0"], wall["P1"]

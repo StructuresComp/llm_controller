@@ -228,11 +228,10 @@ def main():
     # Both must land on config.WALLS *before* make_physical_system so that
     # controlled_nodes is derived correctly (walls present → [0,1] only;
     # no walls → [0,1,nv-2,nv-1]).
-    if args.target:
-        bm = get_benchmark(args.target)
-        if bm.walls:
-            print(f"Adding {len(bm.walls)} wall(s) specific to case '{args.target}' on top of config.WALLS.")
-            config.WALLS = config.WALLS + bm.walls
+    bm = get_benchmark(args.target) if args.target else None
+    if bm is not None and bm.walls:
+        print(f"Adding {len(bm.walls)} wall(s) specific to case '{args.target}' on top of config.WALLS.")
+        config.WALLS = config.WALLS + bm.walls
 
     if args.H is not None:
         H = abs(args.H)
@@ -243,9 +242,27 @@ def main():
     _print_startup_summary(args, ps, config)
 
     # Step 6 — initialize trajectory disk writer and build initial state.
+    # target_tip: generic BenchmarkCase field, set for any loss_type="tip" case
+    # (tip_reach, snake_L); None for curvature-type cases -- not tip_reach-specific.
     config_writer = ConfigWriter(run_name=config.RUN_NAME)
-    config_writer.write_header(ps, args.target)
+    config_writer.write_header(ps, args.target, target_tip=getattr(bm, "reference_tip_fn", None))
     state  = initial_controller_state(physical_system=ps, target_shape=args.target, config_writer=config_writer)
+
+    # Step 6b — pre-flight check: fail cleanly if the initial (straight-hanging) q0
+    # already penetrates a wall, before any LLM call or graph tick happens. This can
+    # happen when a case's wall geometry doesn't fit the configured ROD_LENGTH.
+    from src.tools.walls import check_q_against_walls
+    violations = check_q_against_walls(state["q0_current"], ps.nv, ps.walls, ps.controlled_nodes)
+    if violations:
+        print(f"\n[SETUP ERROR] Initial configuration already penetrates {len(violations)} "
+              f"wall(s) before any control step -- this target is not runnable as configured:")
+        for v in violations:
+            print(f"  Node {v['node']} at ({v['x']:.4f}, {v['y']:.4f}) penetrates wall "
+                  f"(n={v['wall']['n']}, d={v['wall']['d']:.4f})")
+        print("Likely cause: this case's wall geometry doesn't fit ROD_LENGTH. "
+              "Try a shorter --length, or adjust the case's walls.")
+        config_writer.close()
+        sys.exit(1)
 
     # Step 7 — run the control loop.
     graph  = build_controller_graph()

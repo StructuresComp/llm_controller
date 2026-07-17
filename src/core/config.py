@@ -23,10 +23,10 @@ RUN_NAME      = ""      # stem for output files: <RUN_NAME>.json + <RUN_NAME>.lo
                         # "" = auto-generate run_<timestamp>_<pid> for each file
 DEBUG         = True    # True = print LLM prompts and responses to terminal
 
-ollama = False          # if True, use ollama models
+ollama = False           # if True, use ollama models
 if ollama:
     LLM_PROVIDER = "ollama"
-    MODEL        = "qwen2.5-coder:14b"
+    MODEL        = "qwen2.5:14b"
     # Ollama models available now (as of 07/05/2026). Local/smaller models are
     # less reliable at tool-calling than frontier models (Claude, GPT, Gemini) --
     # TOOL_CALL_ATTEMPTS below exists to retry past occasional malformed tool-call
@@ -44,13 +44,13 @@ if ollama:
     OLLAMA_TEMPERATURE = 0.0
 else:
     LLM_PROVIDER = "anthropic"
-    MODEL        = "claude-haiku-4-5"
-    # MODEL        = "claude-opus-4-8" # "claude-sonnet-4-6"
+    # MODEL        = "claude-haiku-4-5"
+    MODEL        = "claude-opus-4-6" # "claude-sonnet-4-6"
 
     # LLM_PROVIDER = "gemini"
-    # MODEL        = "gemini-3.5-flash"
+    # MODEL        = "gemini-3.5-flash" # "gemini-3.1-pro-preview" # "gemini-2.5-pro"
     # LLM_PROVIDER = "openai"
-    # MODEL        = "gpt-5.5"
+    # MODEL        = "gpt-5.5" # gpt-5.6 # gpt-5.4 # gpt-5.3-codex # gpt-5.2 # gpt-5 # gpt-4.1 #o3 #o3-pro
 
 MAX_TOKENS   = 8000      # Maximum allowed tokens per LLM call
                          # Anthropic-specific ceiling: the SDK requires stream=True (which we
@@ -82,10 +82,10 @@ EXTRACTION_MODEL    = "claude-haiku-4-5"
 #     Raw (x, y) coordinates of observable nodes are always included.
 #     The following flags control whether additional info is included in the prompt.
 # ---------------------------------------------------------------------------
-INCLUDE_GEOMETRY       = True    # True = include tangent angles + curvature in the prompt
-INCLUDE_AXIAL_STRETCH  = True    # warn the LLM the DLO is stretching too much (axial strain>=AXIAL_STRAIN_THRESHOLD)
+INCLUDE_GEOMETRY       = False   # True = include tangent angles + curvature in the prompt
+INCLUDE_AXIAL_STRETCH  = False   # warn the LLM the DLO is stretching too much (axial strain>=AXIAL_STRAIN_THRESHOLD)
 INCLUDE_FEEDBACK       = False   # include controller reaction force in the prompt
-INCLUDE_CONTACT        = False   # include wall contact regions in the prompt
+INCLUDE_CONTACT        = True    # include wall contact regions in the prompt
 AXIAL_STRAIN_THRESHOLD = 0.05    # fraction (0.05 = 5%): warn if any edge's axial strain exceeds this
 SHOW_ERROR_PERCENT     = True    # True = show error % in prompts; False = hide it (forces geometric reasoning)
 
@@ -93,14 +93,14 @@ SHOW_ERROR_PERCENT     = True    # True = show error % in prompts; False = hide 
 # 2b. Orchestrator perception & history
 # ---------------------------------------------------------------------------
 N_PARTIAL  = 7   # nodes sent to orchestrator (subsampled from full NV under "Physical parameters")
-K_HISTORY  = 0   # number of (shape, BC) pairs kept in rolling history; set to 0 or negative to disable
+K_HISTORY  = 5   # number of (shape, BC) pairs kept in rolling history; set to 0 or negative to disable
 
 # ---------------------------------------------------------------------------
 # 2d. Control loop
 # ---------------------------------------------------------------------------
 ORCHESTRATOR_MODE    = "replan" # "plan" (grounded), "myopic" (reactive), or "replan" (fresh plan every iteration)
 REPLAN_FREQ          = 5        # replan every Nth iteration in "replan" mode (1 = every iteration)
-MAX_ITERATIONS       = 100      # hard stop on orchestrator → programmer cycles
+MAX_ITERATIONS       = 50       # hard stop on orchestrator → programmer cycles
 MAX_ITERATIONS_WITH_REJECTIONS = MAX_ITERATIONS * 5  # hard stop on ALL orchestrator decisions, including rejected BCs
 
 # ===========================================================================
@@ -158,7 +158,7 @@ QUIT_ON_DT_FAILURE = False # True = end the run if dt bottoms out without conver
 # ---------------------------------------------------------------------------
 # 3d. Visualization
 # ---------------------------------------------------------------------------
-PLOT_IMAGE = 100  # 0 = no plots; N >= 1 = plot every Nth physics step
+PLOT_IMAGE = 50      # 0 = no plots; N >= 1 = plot every Nth physics step
 
 # ---------------------------------------------------------------------------
 # 3d. Data storage
@@ -174,5 +174,5 @@ PLOT_IMAGE = 100  # 0 = no plots; N >= 1 = plot every Nth physics step
 #                    If exceeded, the oldest entries are trimmed from the front
 #                    so recent history is always preserved.
 # ---------------------------------------------------------------------------
-SAVE_STRIDE = 10     # save every 50th physics step per decision
+SAVE_STRIDE = 10     # save every n-th physics step per decision, where n is SAVE_STRIDE.
 MAX_CONFIGS = 1000   # hard cap; oldest trimmed if exceeded
